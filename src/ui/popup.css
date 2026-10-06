@@ -1,14 +1,18 @@
 .popup-body {
   width: 380px;
-  min-height: 420px;
-  max-height: 560px;
+  height: 520px;
+  max-height: 580px;
   overflow: hidden;
 }
 
 .popup {
-  padding: 0.85rem;
-  min-height: 420px;
-  max-height: 560px;
+  padding: 0.75rem;
+  height: 100%;
+  max-height: 580px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-height: 0;
 }
 
 .popup-header {
@@ -16,11 +20,12 @@
   justify-content: space-between;
   gap: 0.75rem;
   align-items: flex-start;
+  flex-shrink: 0;
 }
 
 .brand {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 1.25rem;
   font-weight: 650;
   letter-spacing: -0.03em;
 }
@@ -31,28 +36,33 @@
 }
 
 .actions {
-  margin-top: 0.15rem;
+  flex-shrink: 0;
 }
 
 .list {
   overflow: auto;
-  flex: 1;
-  min-height: 180px;
-  max-height: 280px;
+  flex: 1 1 auto;
+  min-height: 0;
   border-top: 1px solid var(--line);
 }
 
 .popup-footer {
   border-top: 1px solid var(--line);
-  padding-top: 0.65rem;
+  padding-top: 0.5rem;
   justify-content: space-between;
+  flex-shrink: 0;
 }
 
 .onboarding {
-  padding: 0.75rem;
+  padding: 0.65rem;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+  flex-shrink: 0;
+}
+
+.onboarding[hidden] {
+  display: none !important;
 }
 
 .onboarding h2 {

@@ -15,56 +15,63 @@
           <p class="muted tagline" id="tagline"></p>
         </div>
         <div class="row">
-          <button
-            type="button"
-            class="ghost"
-            id="btn-settings"
-            title="Settings"
-          >
-            Settings
-          </button>
-          <button type="button" class="ghost" id="btn-library">
-            Full list
-          </button>
+          <button type="button" class="ghost" id="btn-settings"></button>
+          <button type="button" class="ghost" id="btn-library"></button>
         </div>
       </header>
 
-      <div id="status" class="banner fold" hidden></div>
+      <div
+        id="status"
+        class="banner fold"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
       <div id="onboarding" class="stack onboarding" hidden></div>
 
       <div class="row wrap actions">
-        <button type="button" class="primary" id="btn-save">
-          Save this tab
-        </button>
+        <button type="button" class="primary" id="btn-save"></button>
         <select id="scope" aria-label="Save scope"></select>
-        <button type="button" id="btn-hibernate">Hibernate</button>
+        <button type="button" id="btn-hibernate"></button>
       </div>
 
       <label class="sr-only" for="search">Search</label>
-      <input
-        type="search"
-        id="search"
-        placeholder="Search title or URL"
-        autocomplete="off"
-      />
+      <input type="search" id="search" autocomplete="off" />
 
       <div id="list" class="list" role="list"></div>
 
       <footer class="popup-footer row wrap">
-        <button type="button" id="btn-restore-all">Restore all</button>
-        <button type="button" id="btn-export">Export</button>
-        <button type="button" id="btn-demo">Load demo data</button>
+        <button type="button" id="btn-restore-all"></button>
+        <button type="button" id="btn-export"></button>
+        <button type="button" id="btn-demo"></button>
         <span class="muted mono" id="count"></span>
       </footer>
     </div>
-    <dialog id="confirm-dialog">
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title">
       <form method="dialog" class="stack">
+        <h2 id="confirm-title" class="sr-only"></h2>
         <p id="confirm-text"></p>
-        <div class="row">
-          <button type="submit" value="cancel">Cancel</button>
+        <div class="row" id="confirm-actions">
+          <button type="submit" value="cancel" id="confirm-cancel"></button>
           <button type="submit" value="ok" class="primary" id="confirm-ok">
             OK
           </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="batch-dialog" aria-labelledby="batch-title">
+      <form method="dialog" class="stack">
+        <h2 id="batch-title"></h2>
+        <p id="batch-text"></p>
+        <div class="row wrap">
+          <button type="submit" value="cancel" id="batch-cancel"></button>
+          <button type="submit" value="all" id="batch-all"></button>
+          <button
+            type="submit"
+            value="batch"
+            class="primary"
+            id="batch-ok"
+          ></button>
         </div>
       </form>
     </dialog>

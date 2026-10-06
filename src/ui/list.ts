@@ -15,7 +15,8 @@ import {
   applyTheme,
   downloadText,
   formatTime,
-  letterAvatar,
+  listenStorageReload,
+  renderFavicon,
   send,
   text,
 } from "./shared.js";
@@ -26,6 +27,7 @@ const $ = <T extends HTMLElement>(id: string) =>
 let database: Database | null = null;
 let query = "";
 let groupFilter = "";
+let reloadTimer: number | null = null;
 
 function showStatus(
   message: string,
@@ -38,11 +40,64 @@ function showStatus(
 }
 
 function renderStats(db: Database): void {
-  const mb = estimateMemoryFreedMb(db.entries.length);
+  const mb = estimateMemoryFreedMb(db.stats.totalClosed);
   text(
     $("stats"),
-    `${STRINGS.statsSaved}: ${db.stats.totalSaved} · ${STRINGS.statsRestored}: ${db.stats.totalRestored} · ${STRINGS.estimatedMemory(mb)} · ${STRINGS.estimateDisclaimer}`,
+    `${STRINGS.statsOpen}: ${db.entries.length} · ${STRINGS.statsSaved}: ${db.stats.totalClosed} · ${STRINGS.statsRestored}: ${db.stats.totalRestored} · ${STRINGS.statsImported}: ${db.stats.totalImported} · ${STRINGS.estimatedMemoryClosed(mb)}. ${STRINGS.estimatedNotClosed}`,
   );
+}
+
+async function batchDialog(
+  message: string,
+): Promise<"batch" | "all" | "cancel"> {
+  const dialog = $("batch-dialog") as unknown as HTMLDialogElement;
+  dialog.returnValue = "cancel";
+  text($("batch-title"), STRINGS.batchRestoreTitle);
+  text($("batch-text"), message);
+  text($("batch-cancel"), STRINGS.cancel);
+  text($("batch-all"), STRINGS.restoreAllAtOnce);
+  text($("batch-ok"), STRINGS.restoreBatch);
+  dialog.showModal();
+  return await new Promise((resolve) => {
+    dialog.addEventListener(
+      "close",
+      () => {
+        const v = dialog.returnValue;
+        if (v === "batch" || v === "all") resolve(v);
+        else resolve("cancel");
+      },
+      { once: true },
+    );
+  });
+}
+
+async function restoreWithGuard(ids: string[]): Promise<void> {
+  const res = await send<{
+    message: string;
+    needsBatchChoice?: boolean;
+    pendingIds?: string[];
+  }>({ type: "restore", ids });
+  if (!res.ok) {
+    showStatus(res.error, "danger");
+    return;
+  }
+  if (res.data.needsBatchChoice) {
+    const choice = await batchDialog(res.data.message);
+    if (choice === "cancel") {
+      showStatus(STRINGS.cancel, "warn");
+      return;
+    }
+    const again = await send<{ message: string }>({
+      type: "restore",
+      ids: res.data.pendingIds ?? ids,
+      mode: choice,
+    });
+    if (again.ok) showStatus(again.data.message, "ok");
+    else showStatus(again.error, "danger");
+  } else {
+    showStatus(res.data.message, "ok");
+  }
+  await load();
 }
 
 function renderGroups(db: Database): void {
@@ -54,7 +109,7 @@ function renderGroups(db: Database): void {
   filter.replaceChildren();
   const all = document.createElement("option");
   all.value = "";
-  all.textContent = "All groups";
+  all.textContent = STRINGS.allGroups;
   filter.append(all);
   for (const g of names) {
     const o = document.createElement("option");
@@ -71,14 +126,11 @@ function renderGroups(db: Database): void {
 }
 
 async function restoreGroup(group: string): Promise<void> {
-  const res = await send<{ message: string; needsBatchChoice?: boolean }>({
-    type: "restore-group",
-    group,
-    batch: false,
-  });
-  if (res.ok) showStatus(res.data.message, "ok");
-  else showStatus(res.error, "danger");
-  await load();
+  if (!database) return;
+  const ids = database.entries
+    .filter((e) => e.group === group)
+    .map((e) => e.id);
+  await restoreWithGuard(ids);
 }
 
 function renderList(entries: SavedTab[]): void {
@@ -95,27 +147,9 @@ function renderList(entries: SavedTab[]): void {
     const row = document.createElement("article");
     row.className = "entry";
     row.role = "listitem";
-
-    if (entry.favicon) {
-      const img = document.createElement("img");
-      img.className = "favicon";
-      img.alt = "";
-      img.referrerPolicy = "no-referrer";
-      img.src = entry.favicon;
-      img.addEventListener("error", () => {
-        const fb = document.createElement("div");
-        fb.className = "favicon-fallback";
-        fb.textContent = letterAvatar(entry.title);
-        img.replaceWith(fb);
-      });
-      row.append(img);
-    } else {
-      const fb = document.createElement("div");
-      fb.className = "favicon-fallback";
-      fb.textContent = letterAvatar(entry.title);
-      row.append(fb);
-    }
-
+    const icon = document.createElement("div");
+    renderFavicon(icon, entry.favicon || entry.url, entry.title);
+    row.append(icon);
     const main = document.createElement("div");
     const title = document.createElement("p");
     title.className = "entry-title";
@@ -140,31 +174,23 @@ function renderList(entries: SavedTab[]): void {
     meta.append(document.createTextNode(` ${formatTime(entry.savedAt)}`));
     main.append(title, url, meta);
     row.append(main);
-
     const actions = document.createElement("div");
     actions.className = "row";
     const restore = document.createElement("button");
     restore.type = "button";
     restore.textContent = STRINGS.restore;
-    restore.addEventListener("click", async () => {
-      const res = await send<{ message: string }>({
-        type: "restore",
-        ids: [entry.id],
-        batch: false,
-      });
-      if (res.ok) showStatus(res.data.message, "ok");
-      await load();
-    });
+    restore.addEventListener("click", () => void restoreWithGuard([entry.id]));
     const edit = document.createElement("button");
     edit.type = "button";
-    edit.textContent = "Edit";
+    edit.textContent = STRINGS.edit;
     edit.addEventListener("click", () => openEdit(entry));
     const del = document.createElement("button");
     del.type = "button";
     del.className = "danger";
     del.textContent = STRINGS.delete;
     del.addEventListener("click", async () => {
-      await send({ type: "delete", ids: [entry.id] });
+      const res = await send({ type: "delete", ids: [entry.id] });
+      if (!res.ok) showStatus(res.error, "danger");
       await load();
     });
     actions.append(restore, edit, del);
@@ -174,10 +200,12 @@ function renderList(entries: SavedTab[]): void {
 }
 
 function openEdit(entry: SavedTab): void {
+  const dialog = $("edit-dialog") as unknown as HTMLDialogElement;
+  dialog.returnValue = "";
   ($("edit-id") as HTMLInputElement).value = entry.id;
   ($("edit-group") as HTMLInputElement).value = entry.group;
   ($("edit-tags") as HTMLInputElement).value = entry.tags.join(", ");
-  ($("edit-dialog") as unknown as HTMLDialogElement).showModal();
+  dialog.showModal();
 }
 
 function paint(): void {
@@ -187,19 +215,49 @@ function paint(): void {
   renderList(sortEntriesNewestFirst(entries));
 }
 
+async function refreshTargets(): Promise<void> {
+  const select = $("target-tab") as HTMLSelectElement;
+  select.replaceChildren();
+  const res = await send<{
+    tabs: Array<{
+      id: number;
+      title: string;
+      url: string;
+      discarded?: boolean;
+    }>;
+  }>({ type: "list-window-tabs" });
+  if (!res.ok) {
+    showStatus(res.error, "danger");
+    return;
+  }
+  if (!res.data.tabs.length) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = STRINGS.pickWebTab;
+    select.append(o);
+    return;
+  }
+  for (const t of res.data.tabs) {
+    const o = document.createElement("option");
+    o.value = String(t.id);
+    o.textContent = `${t.title} — ${t.url}${t.discarded ? " (hibernated)" : ""}`;
+    select.append(o);
+  }
+}
+
 async function load(): Promise<void> {
   const res = await send<{
     database: Database | null;
+    backups?: unknown[];
     corrupt?: boolean;
     message?: string;
-  }>({
-    type: "get-state",
-  });
-  if (!res.ok || !res.data.database) {
-    showStatus(
-      res.ok ? (res.data.message ?? STRINGS.corruptedTitle) : res.error,
-      "danger",
-    );
+  }>({ type: "get-state" });
+  if (!res.ok) {
+    showStatus(res.error, "danger");
+    return;
+  }
+  if (!res.data.database) {
+    showStatus(res.data.message ?? STRINGS.corruptedTitle, "danger");
     return;
   }
   database = res.data.database;
@@ -207,49 +265,84 @@ async function load(): Promise<void> {
   renderStats(database);
   renderGroups(database);
   paint();
+  await refreshTargets();
 }
 
 async function init(): Promise<void> {
   text($("subtitle"), STRINGS.tagline);
-  text($("btn-save"), STRINGS.saveThisTab);
+  text($("btn-save"), STRINGS.saveSelectedTab);
+  text($("btn-hibernate"), STRINGS.discardTab);
   text($("btn-restore-all"), STRINGS.restoreAll);
   text($("btn-settings"), STRINGS.openSettings);
   text($("btn-export"), STRINGS.exportJson);
+  text($("btn-import-json"), STRINGS.importJson);
+  text($("btn-import-text"), STRINGS.importText);
   text($("btn-demo"), STRINGS.loadDemo);
   text($("btn-clear"), STRINGS.clearAll);
+  text($("targets-title"), STRINGS.pickTarget);
+  text($("btn-refresh-targets"), STRINGS.refreshTargets);
+  text($("edit-title"), STRINGS.editDialogTitle);
+  text($("label-group"), STRINGS.groupLabel);
+  text($("label-tags"), STRINGS.tagsHint);
+  text($("edit-cancel"), STRINGS.cancel);
+  text($("edit-save"), STRINGS.save);
   ($("search") as HTMLInputElement).placeholder = STRINGS.searchPlaceholder;
 
   $("btn-save").addEventListener("click", async () => {
+    const id = Number(($("target-tab") as HTMLSelectElement).value);
+    if (!id) {
+      showStatus(STRINGS.pickWebTab, "warn");
+      return;
+    }
     const res = await send<SaveResult>({
       type: "save",
       scope: "current",
+      tabIds: [id],
       confirmedUnsaved: true,
     });
-    if (res.ok) showStatus(res.data.message, res.data.saved ? "ok" : "warn");
-    await load();
-  });
-  $("btn-restore-all").addEventListener("click", async () => {
-    if (!database) return;
-    const ids = database.entries.map((e) => e.id);
-    if (ids.length >= 15) {
-      const batch = window.confirm(
-        `${STRINGS.batchRestorePrompt(ids.length)}\n\nOK = open in batches\nCancel = open all at once`,
-      );
-      const res = await send<{ message: string }>({
-        type: "restore",
-        ids,
-        batch,
+    if (!res.ok) showStatus(res.error, "danger");
+    else if (res.data.needsConfirmation.length && res.data.confirmToken) {
+      const ok = window.confirm(STRINGS.audioConfirm);
+      if (!ok) {
+        showStatus(STRINGS.nothingSaved, "warn");
+        return;
+      }
+      const again = await send<SaveResult>({
+        type: "save",
+        confirmedAudio: true,
+        confirmedUnsaved: true,
+        confirmToken: res.data.confirmToken,
       });
-      if (res.ok) showStatus(res.data.message, "ok");
+      if (again.ok)
+        showStatus(again.data.message, again.data.saved ? "ok" : "warn");
+      else showStatus(again.error, "danger");
     } else {
-      const res = await send<{ message: string }>({
-        type: "restore",
-        ids,
-        batch: false,
-      });
-      if (res.ok) showStatus(res.data.message, "ok");
+      showStatus(res.data.message, res.data.saved ? "ok" : "warn");
     }
     await load();
+  });
+
+  $("btn-hibernate").addEventListener("click", async () => {
+    const id = Number(($("target-tab") as HTMLSelectElement).value);
+    if (!id) {
+      showStatus(STRINGS.pickWebTab, "warn");
+      return;
+    }
+    const res = await send({ type: "discard-tab", tabId: id });
+    showStatus(
+      res.ok ? STRINGS.hibernateOk : res.error,
+      res.ok ? "ok" : "danger",
+    );
+    await refreshTargets();
+  });
+
+  $("btn-refresh-targets").addEventListener(
+    "click",
+    () => void refreshTargets(),
+  );
+  $("btn-restore-all").addEventListener("click", async () => {
+    if (!database) return;
+    await restoreWithGuard(database.entries.map((e) => e.id));
   });
   $("btn-settings").addEventListener(
     "click",
@@ -259,16 +352,25 @@ async function init(): Promise<void> {
     const res = await send<{ text: string }>({ type: "export-json" });
     if (res.ok)
       downloadText(`tabfold-export-${Date.now()}.json`, res.data.text);
+    else showStatus(res.error, "danger");
   });
+  $("btn-import-json").addEventListener("click", () =>
+    $("import-json").click(),
+  );
+  $("btn-import-text").addEventListener("click", () =>
+    $("import-text").click(),
+  );
   $("btn-demo").addEventListener("click", async () => {
     const res = await send<{ message: string }>({ type: "load-demo" });
     if (res.ok) showStatus(res.data.message, "ok");
+    else showStatus(res.error, "danger");
     await load();
   });
   $("btn-clear").addEventListener("click", async () => {
     if (!window.confirm(STRINGS.confirmClear)) return;
-    await send({ type: "clear" });
-    showStatus("Cleared.", "ok");
+    const res = await send({ type: "clear" });
+    if (res.ok) showStatus(STRINGS.cleared, "ok");
+    else showStatus(res.error || STRINGS.clearFailed, "danger");
     await load();
   });
   $("search").addEventListener("input", (e) => {
@@ -305,11 +407,6 @@ async function init(): Promise<void> {
     await load();
     (e.target as HTMLInputElement).value = "";
   });
-  $("edit-form").addEventListener("submit", (e) => {
-    const form = e.target as HTMLFormElement;
-    // method=dialog — check submitter
-    void form;
-  });
   ($("edit-dialog") as unknown as HTMLDialogElement).addEventListener(
     "close",
     () => {
@@ -321,7 +418,10 @@ async function init(): Promise<void> {
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
-      void send({ type: "edit-entry", id, group, tags }).then(() => load());
+      void send({ type: "edit-entry", id, group, tags }).then(async (res) => {
+        if (!res.ok) showStatus(res.error, "danger");
+        await load();
+      });
     },
   );
 
@@ -330,6 +430,11 @@ async function init(): Promise<void> {
       e.preventDefault();
       $("search").focus();
     }
+  });
+
+  listenStorageReload(() => {
+    if (reloadTimer) window.clearTimeout(reloadTimer);
+    reloadTimer = window.setTimeout(() => void load(), 50);
   });
 
   await load();

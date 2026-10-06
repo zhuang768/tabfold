@@ -1,10 +1,17 @@
 import type { Request, Response } from "../types.js";
+import { STRINGS } from "../strings.js";
 
 export async function send<T = unknown>(req: Request): Promise<Response<T>> {
-  return (await chrome.runtime.sendMessage(req)) as Response<T>;
+  try {
+    return (await chrome.runtime.sendMessage(req)) as Response<T>;
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : STRINGS.messagingFailed,
+    };
+  }
 }
 
-/** Escape text for safe textContent assignment helpers — prefer textContent over innerHTML. */
 export function text(el: Element | null, value: string): void {
   if (el) el.textContent = value;
 }
@@ -18,14 +25,15 @@ export function applyTheme(theme: "system" | "light" | "dark"): void {
   }
 }
 
+/** Always English product dates (not system locale). */
 export function formatTime(ts: number): string {
   try {
-    return new Intl.DateTimeFormat(undefined, {
+    return new Intl.DateTimeFormat("en-US", {
       dateStyle: "medium",
       timeStyle: "short",
     }).format(new Date(ts));
   } catch {
-    return new Date(ts).toLocaleString();
+    return new Date(ts).toISOString();
   }
 }
 
@@ -44,6 +52,53 @@ export function downloadText(
 }
 
 export function letterAvatar(title: string): string {
-  const ch = (title.trim()[0] || "?").toUpperCase();
-  return ch;
+  return (title.trim()[0] || "?").toUpperCase();
+}
+
+/** Local Chrome favicon cache — never set img.src to arbitrary http(s). */
+export function localFaviconUrl(pageUrl: string, size = 32): string {
+  const u = new URL(chrome.runtime.getURL("/_favicon/"));
+  u.searchParams.set("pageUrl", pageUrl);
+  u.searchParams.set("size", String(size));
+  return u.toString();
+}
+
+export function renderFavicon(
+  container: HTMLElement,
+  pageUrl: string | null,
+  title: string,
+): void {
+  container.replaceChildren();
+  if (pageUrl && /^https?:/i.test(pageUrl)) {
+    const img = document.createElement("img");
+    img.className = "favicon";
+    img.alt = STRINGS.faviconAlt;
+    img.width = 28;
+    img.height = 28;
+    img.referrerPolicy = "no-referrer";
+    img.src = localFaviconUrl(pageUrl);
+    img.addEventListener("error", () => {
+      const fb = document.createElement("div");
+      fb.className = "favicon-fallback";
+      fb.textContent = letterAvatar(title);
+      img.replaceWith(fb);
+    });
+    container.append(img);
+  } else {
+    const fb = document.createElement("div");
+    fb.className = "favicon-fallback";
+    fb.textContent = letterAvatar(title);
+    container.append(fb);
+  }
+}
+
+export function listenStorageReload(reload: () => void): void {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (
+      area === "local" &&
+      (changes.tabfold_database || changes.tabfold_backups)
+    ) {
+      reload();
+    }
+  });
 }
