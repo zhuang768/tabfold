@@ -1,0 +1,75 @@
+.popup-body {
+  width: 380px;
+  min-height: 420px;
+  max-height: 560px;
+  overflow: hidden;
+}
+
+.popup {
+  padding: 0.85rem;
+  min-height: 420px;
+  max-height: 560px;
+}
+
+.popup-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.tagline {
+  margin: 0.15rem 0 0;
+  font-size: 12px;
+}
+
+.actions {
+  margin-top: 0.15rem;
+}
+
+.list {
+  overflow: auto;
+  flex: 1;
+  min-height: 180px;
+  max-height: 280px;
+  border-top: 1px solid var(--line);
+}
+
+.popup-footer {
+  border-top: 1px solid var(--line);
+  padding-top: 0.65rem;
+  justify-content: space-between;
+}
+
+.onboarding {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.onboarding h2 {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  background: var(--surface);
+  color: var(--ink);
+  max-width: 320px;
+}
+
+dialog::backdrop {
+  background: rgba(20, 20, 20, 0.35);
+}

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tabfold</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="popup-body">
+    <div id="app" class="stack popup">
+      <header class="popup-header">
+        <div>
+          <p class="brand">Tabfold</p>
+          <p class="muted tagline" id="tagline"></p>
+        </div>
+        <div class="row">
+          <button
+            type="button"
+            class="ghost"
+            id="btn-settings"
+            title="Settings"
+          >
+            Settings
+          </button>
+          <button type="button" class="ghost" id="btn-library">
+            Full list
+          </button>
+        </div>
+      </header>
+
+      <div id="status" class="banner fold" hidden></div>
+      <div id="onboarding" class="stack onboarding" hidden></div>
+
+      <div class="row wrap actions">
+        <button type="button" class="primary" id="btn-save">
+          Save this tab
+        </button>
+        <select id="scope" aria-label="Save scope"></select>
+        <button type="button" id="btn-hibernate">Hibernate</button>
+      </div>
+
+      <label class="sr-only" for="search">Search</label>
+      <input
+        type="search"
+        id="search"
+        placeholder="Search title or URL"
+        autocomplete="off"
+      />
+
+      <div id="list" class="list" role="list"></div>
+
+      <footer class="popup-footer row wrap">
+        <button type="button" id="btn-restore-all">Restore all</button>
+        <button type="button" id="btn-export">Export</button>
+        <button type="button" id="btn-demo">Load demo data</button>
+        <span class="muted mono" id="count"></span>
+      </footer>
+    </div>
+    <dialog id="confirm-dialog">
+      <form method="dialog" class="stack">
+        <p id="confirm-text"></p>
+        <div class="row">
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="submit" value="ok" class="primary" id="confirm-ok">
+            OK
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

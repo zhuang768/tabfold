@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tabfold — Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <div class="page stack">
+      <header>
+        <p class="brand">Tabfold</p>
+        <h1 id="title">Settings</h1>
+      </header>
+
+      <section class="panel stack">
+        <label class="check">
+          <input type="checkbox" id="remove-after" />
+          <span id="label-remove"></span>
+        </label>
+
+        <label>
+          <span id="label-scope"></span>
+          <select id="default-scope"></select>
+        </label>
+
+        <label>
+          <span id="label-theme"></span>
+          <select id="theme"></select>
+        </label>
+
+        <label>
+          <span id="label-whitelist"></span>
+          <textarea id="whitelist" rows="5"></textarea>
+          <span class="muted" id="whitelist-hint"></span>
+        </label>
+
+        <button type="button" class="primary" id="btn-save">
+          Save settings
+        </button>
+        <p class="muted" id="saved-msg" hidden>Saved.</p>
+      </section>
+
+      <section class="panel stack">
+        <h2>Where is my data stored?</h2>
+        <p id="where-data"></p>
+        <div class="row wrap">
+          <button type="button" id="btn-export">Export JSON</button>
+          <button type="button" id="btn-export-raw">Export raw backup</button>
+          <button type="button" class="danger" id="btn-reset">
+            Delete all Tabfold data
+          </button>
+        </div>
+      </section>
+
+      <section class="panel stack">
+        <h2 id="backups-title">Local snapshots</h2>
+        <div id="backups" class="stack"></div>
+      </section>
+
+      <section class="panel stack">
+        <h2>Shortcuts</h2>
+        <p class="muted">
+          Customize in <span class="mono">chrome://extensions/shortcuts</span> —
+          Save current tab, Open library.
+        </p>
+      </section>
+
+      <p class="muted mono">Tabfold v1.0.0 · local-only · no tracking</p>
+    </div>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

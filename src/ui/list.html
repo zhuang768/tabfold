@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tabfold — Library</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="list.css" />
+  </head>
+  <body>
+    <div class="page stack">
+      <header class="page-header">
+        <div>
+          <p class="brand">Tabfold</p>
+          <p class="muted" id="subtitle"></p>
+        </div>
+        <div class="row wrap">
+          <button type="button" class="primary" id="btn-save">
+            Save this tab
+          </button>
+          <button type="button" id="btn-restore-all">Restore all</button>
+          <button type="button" id="btn-settings">Settings</button>
+        </div>
+      </header>
+
+      <div id="status" class="banner" hidden></div>
+      <div id="stats" class="stats mono muted"></div>
+
+      <div class="toolbar row wrap">
+        <input type="search" id="search" placeholder="Search" />
+        <select id="group-filter" aria-label="Filter by group">
+          <option value="">All groups</option>
+        </select>
+        <button type="button" id="btn-export">Export JSON</button>
+        <label class="file-btn">
+          Import JSON
+          <input
+            type="file"
+            id="import-json"
+            accept="application/json,.json"
+            hidden
+          />
+        </label>
+        <label class="file-btn">
+          Import text
+          <input type="file" id="import-text" accept="text/plain,.txt" hidden />
+        </label>
+        <button type="button" id="btn-demo">Load demo data</button>
+        <button type="button" class="danger" id="btn-clear">Clear all</button>
+      </div>
+
+      <div id="groups" class="row wrap"></div>
+      <div id="list" class="library-list" role="list"></div>
+    </div>
+    <dialog id="edit-dialog">
+      <form method="dialog" class="stack" id="edit-form">
+        <h2>Edit group & tags</h2>
+        <label>
+          Group
+          <input type="text" id="edit-group" />
+        </label>
+        <label>
+          Tags (comma separated)
+          <input type="text" id="edit-tags" />
+        </label>
+        <input type="hidden" id="edit-id" />
+        <div class="row">
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="submit" value="save" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+    <script type="module" src="list.js"></script>
+  </body>
+</html>
