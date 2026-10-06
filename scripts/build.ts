@@ -29,7 +29,7 @@ await esbuild.build({
   outdir: dist,
   entryNames: "[name]",
   format: "esm",
-  target: ["chrome116"],
+  target: ["chrome127"],
   sourcemap: true,
   logLevel: "info",
   platform: "browser",

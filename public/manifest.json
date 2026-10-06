@@ -3,7 +3,7 @@
   "description": "Save tabs, free memory, restore when you need them. Local-only.",
   "version": "1.0.0",
   "manifest_version": 3,
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "127",
   "action": {
     "default_title": "Save current tab with Tabfold",
     "default_icon": {
@@ -24,7 +24,7 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "unlimitedStorage", "tabs", "alarms", "contextMenus"],
+  "permissions": ["storage", "unlimitedStorage", "tabs", "contextMenus", "favicon"],
   "host_permissions": [],
   "commands": {
     "save-current-tab": {
@@ -43,7 +43,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self';"
-  },
-  "web_accessible_resources": []
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data: chrome:; connect-src 'none'; style-src 'self' 'unsafe-inline';"
+  }
 }

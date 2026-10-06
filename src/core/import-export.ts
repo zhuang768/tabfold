@@ -5,9 +5,12 @@ import {
   type ImportSummary,
   type SavedTab,
 } from "../types.js";
-import { createId, urlsEqual } from "./id.js";
-import { migrateDatabase, MigrationError } from "./migrate.js";
-import { isSavableUrl } from "./tabs-logic.js";
+import { createId, urlsEqual, isAllowedPersistUrl } from "./id.js";
+import {
+  migrateDatabase,
+  MigrationError,
+  CorruptDatabaseError,
+} from "./migrate.js";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -24,6 +27,7 @@ export function buildExportPayload(db: Database): ExportPayload {
       defaultScope: db.settings.defaultScope,
       theme: db.settings.theme,
       whitelist: [...db.settings.whitelist],
+      unsavedHintAcknowledged: db.settings.unsavedHintAcknowledged,
     },
   };
 }
@@ -32,9 +36,29 @@ export function exportJsonString(db: Database): string {
   return `${JSON.stringify(buildExportPayload(db), null, 2)}\n`;
 }
 
+function rejectImport(
+  existing: SavedTab[],
+  message: string,
+): {
+  entries: SavedTab[];
+  summary: ImportSummary;
+} {
+  return {
+    entries: existing,
+    summary: {
+      added: 0,
+      skippedDuplicates: 0,
+      skippedInvalid: 1,
+      migrated: 0,
+      message,
+    },
+  };
+}
+
 /**
- * Parse Tabfold JSON or a raw Database dump. Does not mutate existing DB —
- * returns a new entries list + summary.
+ * Import Tabfold JSON / raw DB / v1 tabs.
+ * Empty target: preserve ids and all fields for round-trip.
+ * Non-empty: skip duplicates by conservative URL equality; keep existing ids.
  */
 export function importJsonText(
   text: string,
@@ -44,20 +68,12 @@ export function importJsonText(
   try {
     parsed = JSON.parse(text) as unknown;
   } catch {
-    return {
-      entries: existing,
-      summary: {
-        added: 0,
-        skippedDuplicates: 0,
-        skippedInvalid: 0,
-        migrated: 0,
-        message: "Invalid JSON — nothing imported.",
-      },
-    };
+    return rejectImport(existing, "Invalid JSON — nothing imported.");
   }
 
   let incoming: SavedTab[] = [];
   let migrated = 0;
+  const intoEmpty = existing.length === 0;
 
   try {
     if (
@@ -65,57 +81,74 @@ export function importJsonText(
       parsed.format === "tabfold-json" &&
       Array.isArray(parsed.entries)
     ) {
-      const db = migrateDatabase({
-        schemaVersion:
-          typeof parsed.schemaVersion === "number" ? parsed.schemaVersion : 1,
-        entries: parsed.entries,
-        revision: 0,
-        settings: parsed.settings,
-        stats: { totalSaved: 0, totalRestored: 0 },
-        undo: null,
-      });
-      incoming = db.entries;
-      if (
-        typeof parsed.schemaVersion === "number" &&
-        parsed.schemaVersion < SCHEMA_VERSION
-      ) {
+      const schemaVersion =
+        typeof parsed.schemaVersion === "number"
+          ? parsed.schemaVersion
+          : SCHEMA_VERSION;
+      // Prefer entries path even when schemaVersion is 1
+      const shaped =
+        schemaVersion === 1 && !Array.isArray(parsed.tabs)
+          ? {
+              ...parsed,
+              schemaVersion: 1,
+              tabs: parsed.entries,
+              entries: undefined,
+            }
+          : {
+              schemaVersion,
+              entries: parsed.entries,
+              revision: 0,
+              settings: parsed.settings,
+              stats: { totalSaved: 0, totalRestored: 0 },
+              undo: null,
+            };
+      // For format tabfold-json with entries + schema 1, migrate via v2-like with allowGenerateStableId
+      if (schemaVersion === 1 && Array.isArray(parsed.entries)) {
+        const asV1 = {
+          schemaVersion: 1,
+          tabs: parsed.entries,
+          settings: parsed.settings,
+          revision: 0,
+        };
+        const db = migrateDatabase(asV1).database;
+        incoming = db.entries;
         migrated = incoming.length;
+      } else {
+        const db = migrateDatabase(shaped).database;
+        incoming = db.entries;
+        if (schemaVersion < SCHEMA_VERSION) migrated = incoming.length;
       }
+      void shaped;
     } else if (
       isRecord(parsed) &&
-      (Array.isArray(parsed.entries) || Array.isArray(parsed.tabs))
+      Array.isArray(parsed.tabs) &&
+      !Array.isArray(parsed.entries)
     ) {
-      const db = migrateDatabase(parsed);
+      const db = migrateDatabase(parsed).database;
       incoming = db.entries;
       migrated = incoming.length;
+    } else if (isRecord(parsed) && Array.isArray(parsed.entries)) {
+      const db = migrateDatabase(parsed).database;
+      incoming = db.entries;
+      if (asNumber(parsed.schemaVersion, SCHEMA_VERSION) < SCHEMA_VERSION) {
+        migrated = incoming.length;
+      }
     } else if (Array.isArray(parsed)) {
-      const db = migrateDatabase({ schemaVersion: 1, tabs: parsed });
+      const db = migrateDatabase({ schemaVersion: 1, tabs: parsed }).database;
       incoming = db.entries;
       migrated = incoming.length;
     } else {
-      return {
-        entries: existing,
-        summary: {
-          added: 0,
-          skippedDuplicates: 0,
-          skippedInvalid: 1,
-          migrated: 0,
-          message: "Unrecognized JSON shape — nothing imported.",
-        },
-      };
+      return rejectImport(
+        existing,
+        "Unrecognized JSON shape — nothing imported.",
+      );
     }
   } catch (e) {
-    const msg = e instanceof MigrationError ? e.message : "Import failed.";
-    return {
-      entries: existing,
-      summary: {
-        added: 0,
-        skippedDuplicates: 0,
-        skippedInvalid: 1,
-        migrated: 0,
-        message: msg,
-      },
-    };
+    const msg =
+      e instanceof MigrationError || e instanceof CorruptDatabaseError
+        ? e.message
+        : "Import failed.";
+    return rejectImport(existing, msg);
   }
 
   let added = 0;
@@ -124,14 +157,7 @@ export function importJsonText(
   const merged = [...existing];
 
   for (const entry of incoming) {
-    if (!isSavableUrl(entry.url) && !entry.url.startsWith("http")) {
-      // Allow http(s) via isSavableUrl; skip clearly bad
-      if (!entry.url) {
-        skippedInvalid += 1;
-        continue;
-      }
-    }
-    if (!entry.url) {
+    if (!isAllowedPersistUrl(entry.url)) {
       skippedInvalid += 1;
       continue;
     }
@@ -139,12 +165,23 @@ export function importJsonText(
       skippedDuplicates += 1;
       continue;
     }
-    merged.push({
-      ...entry,
-      id: createId("t"),
-      schemaVersion: SCHEMA_VERSION,
-      status: "saved",
-    });
+    if (intoEmpty) {
+      merged.push({
+        ...entry,
+        schemaVersion: SCHEMA_VERSION,
+        status: "saved",
+      });
+    } else {
+      merged.push({
+        ...entry,
+        id:
+          entry.id && !merged.some((e) => e.id === entry.id)
+            ? entry.id
+            : createId("t"),
+        schemaVersion: SCHEMA_VERSION,
+        status: "saved",
+      });
+    }
     added += 1;
   }
 
@@ -160,11 +197,13 @@ export function importJsonText(
   };
 }
 
+function asNumber(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
 /**
- * Common OneTab-style / plain list formats:
- * - `https://example.com | Title`
- * - `https://example.com Title`
- * - one URL per line
+ * OneTab-style plain list: `url | title`, `url title`, or url-per-line.
+ * Source: OneTab export uses "URL | title" lines (community docs / export samples).
  */
 export function importPlainTextList(
   text: string,
@@ -197,7 +236,7 @@ export function importPlainTextList(
       }
     }
 
-    if (!isSavableUrl(url)) {
+    if (!isAllowedPersistUrl(url)) {
       skippedInvalid += 1;
       continue;
     }

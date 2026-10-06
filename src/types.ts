@@ -5,6 +5,7 @@ export const SCHEMA_VERSION = 2 as const;
 export type SaveScope = "current" | "others" | "window";
 export type Theme = "system" | "light" | "dark";
 export type EntryStatus = "saved";
+export type RestoreMode = "batch" | "all";
 
 export interface TabSource {
   windowId: number;
@@ -19,7 +20,10 @@ export interface SavedTab {
   id: string;
   url: string;
   title: string;
-  /** Favicon URL from Chrome tab API only — never a third-party favicon service. */
+  /**
+   * Page URL used only with Chrome's local favicon cache API.
+   * Never load arbitrary remote favicon URLs as img.src.
+   */
   favicon: string | null;
   savedAt: number;
   source: TabSource;
@@ -34,13 +38,20 @@ export interface Settings {
   theme: Theme;
   whitelist: string[];
   onboardingComplete: boolean;
-  /** Preferred restore batch size when user opts into batching. */
+  /** User acknowledged the unsaved-content warning before first close. */
+  unsavedHintAcknowledged: boolean;
   restoreBatchSize: number;
 }
 
 export interface Stats {
+  /** Lifetime entries created by a verified save+close pipeline. */
   totalSaved: number;
+  /** Lifetime tabs successfully restored (opened). */
   totalRestored: number;
+  /** Lifetime tabs actually closed after verified save. */
+  totalClosed: number;
+  /** Lifetime entries added via import/demo (not closed by Tabfold). */
+  totalImported: number;
 }
 
 export interface UndoState {
@@ -71,11 +82,6 @@ export interface BackupMeta {
   entryCount: number;
 }
 
-export interface LibraryState {
-  database: Database;
-  backups: BackupMeta[];
-}
-
 export interface SkippedTab {
   title: string;
   url: string;
@@ -88,19 +94,25 @@ export interface FailedTab {
   reason: string;
 }
 
+export interface PendingConfirmTab {
+  tabId: number;
+  title: string;
+  url: string;
+  reason: string;
+}
+
 export interface SaveResult {
   saved: number;
+  closed: number;
   skipped: SkippedTab[];
   failed: FailedTab[];
-  /** Tabs that need user confirmation (e.g. audible) before save. */
-  needsConfirmation: Array<{
-    tabId: number;
-    title: string;
-    url: string;
-    reason: string;
-  }>;
+  needsConfirmation: PendingConfirmTab[];
+  /** Opaque token binding confirmation to original tab ids/urls. */
+  confirmToken?: string;
   undoIds: string[];
   message: string;
+  /** True when user must acknowledge unsaved-content warning before close. */
+  needsUnsavedAck?: boolean;
 }
 
 export interface RestoreResult {
@@ -108,6 +120,9 @@ export interface RestoreResult {
   failed: number;
   removed: number;
   message: string;
+  needsBatchChoice?: boolean;
+  pendingCount?: number;
+  pendingIds?: string[];
 }
 
 export interface ImportSummary {
@@ -132,11 +147,14 @@ export type Request =
       type: "save";
       scope?: SaveScope;
       tabId?: number;
+      /** Explicit target tab ids (library / confirmation). */
+      tabIds?: number[];
       confirmedAudio?: boolean;
       confirmedUnsaved?: boolean;
+      confirmToken?: string;
     }
-  | { type: "restore"; ids: string[]; batch?: boolean }
-  | { type: "restore-group"; group: string; batch?: boolean }
+  | { type: "restore"; ids: string[]; mode?: RestoreMode }
+  | { type: "restore-group"; group: string; mode?: RestoreMode }
   | { type: "undo" }
   | { type: "delete"; ids: string[] }
   | { type: "clear" }
@@ -150,18 +168,14 @@ export type Request =
   | { type: "list-backups" }
   | { type: "restore-backup"; id: string }
   | { type: "load-demo" }
-  | { type: "discard-tab"; tabId?: number }
+  | { type: "discard-tab"; tabId: number }
   | { type: "open-library" }
-  | { type: "complete-onboarding" };
+  | { type: "complete-onboarding" }
+  | { type: "clear-action-popup" }
+  | { type: "list-window-tabs" };
 
 export type Response<T = unknown> =
   { ok: true; data: T } | { ok: false; error: string; detail?: string };
-
-export interface CorruptionReport {
-  corrupt: true;
-  message: string;
-  rawExportAvailable: boolean;
-}
 
 export const DEFAULT_SETTINGS: Settings = {
   removeAfterRestore: true,
@@ -169,12 +183,15 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   whitelist: [],
   onboardingComplete: false,
+  unsavedHintAcknowledged: false,
   restoreBatchSize: 10,
 };
 
 export const DEFAULT_STATS: Stats = {
   totalSaved: 0,
   totalRestored: 0,
+  totalClosed: 0,
+  totalImported: 0,
 };
 
 export function createEmptyDatabase(): Database {

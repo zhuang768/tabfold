@@ -1,4 +1,4 @@
-import { hostFromUrl, normalizeUrl, urlsEqual } from "./id.js";
+import { hostFromUrl, urlsEqual, isAllowedPersistUrl } from "./id.js";
 import type { SavedTab } from "../types.js";
 
 const INTERNAL_PREFIXES = [
@@ -22,16 +22,7 @@ export function isInternalUrl(url: string): boolean {
 
 export function isSavableUrl(url: string): boolean {
   if (!url || isInternalUrl(url)) return false;
-  try {
-    const u = new URL(url);
-    return (
-      u.protocol === "http:" ||
-      u.protocol === "https:" ||
-      u.protocol === "file:"
-    );
-  } catch {
-    return false;
-  }
+  return isAllowedPersistUrl(url);
 }
 
 export function findDuplicate(
@@ -75,4 +66,4 @@ export function groupNames(entries: SavedTab[]): string[] {
   return [...set].sort((a, b) => a.localeCompare(b));
 }
 
-export { normalizeUrl, urlsEqual };
+export { urlsEqual, isAllowedPersistUrl };
