@@ -6,3 +6,9 @@ output/
 .DS_Store
 playwright-report/
 test-results/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*

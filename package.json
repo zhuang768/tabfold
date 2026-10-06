@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "npm run build && playwright test",
+    "test:perf": "npm run build && tsx scripts/perf-measure.ts",
     "icons": "tsx scripts/generate-icons.ts",
     "pack": "npm run build && tsx scripts/pack.ts",
     "verify": "npm run format:check && npm run typecheck && npm run lint && npm run test && npm run build"
@@ -25,12 +26,14 @@
     "esbuild": "^0.25.10",
     "eslint": "^9.36.0",
     "globals": "^16.4.0",
-    "jsdom": "^26.1.0",
     "prettier": "^3.6.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.44.1",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "tinypool": "^2.1.2"
   },
   "engines": {
     "node": ">=20"
