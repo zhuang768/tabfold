@@ -31,28 +31,28 @@
 
 | ID    | 需求                               | 狀態 | 證據                                   |
 | ----- | ---------------------------------- | ---- | -------------------------------------- |
-| R5.1★ | 先寫後關；失敗不關；批次誠實結果   | 完成 | library saveTabs + 單元 failing write  |
-| R5.2  | 資料模型＋schema＋遷移＋毀損不靜默 | 完成 | types/migrate/storage CorruptDataError |
-| R5.3  | storage 選型＋滾動備份             | 完成 | storage.local + backups                |
+| R5.1★ | 先寫後關；失敗不關；批次誠實結果   | 完成 | MutationQueue + saveTabs 並行/失敗單元 |
+| R5.2  | 資料模型＋schema＋遷移＋毀損不靜默 | 完成 | CorruptDatabaseError；options 仍可備份 |
+| R5.3  | storage 選型＋滾動備份             | 完成 | storage.local + backups；RESEARCH 對照 |
 | R5.4  | SW 不依賴常駐狀態；監聽器頂層同步  | 完成 | registerServiceWorkerListeners         |
 | R5.5  | 瀏覽器 API 與純邏輯分離            | 完成 | `src/core/*` vs `src/browser/*`        |
 | R5.6  | 最小權限；未儲存輸入不請求全站讀取 | 完成 | DECISIONS + 通用提醒                   |
 
 ## 6 P0
 
-| ID    | 需求                                                  | 狀態     | 證據                                    |
-| ----- | ----------------------------------------------------- | -------- | --------------------------------------- |
-| P0.1★ | 點圖示一鍵存起關閉＋回饋                              | 完成     | onClicked；DECISIONS 記錄               |
-| P0.2★ | popup 與完整清單頁                                    | 完成     | popup.html / list.html                  |
-| P0.3★ | 單筆／全部還原；預設移除設定                          | 完成     | restore + settings                      |
-| P0.4★ | Undo                                                  | 完成     | undoLastSave                            |
-| P0.5  | 特殊分頁七項實測                                      | 部分完成 | 邏輯完成；部分僅建議手動（TEST_REPORT） |
-| P0.6  | 三種存入範圍                                          | 完成     | scope + UI                              |
-| P0.7  | 搜尋／刪除／清空二次確認                              | 完成     |                                         |
-| P0.8  | JSON 匯入匯出＋摘要                                   | 完成     |                                         |
-| P0.9  | 設定頁（移除／範圍／深色／備份）                      | 完成     |                                         |
-| P0.10 | 首次引導 ≤3 步可跳過                                  | 完成     | popup onboarding                        |
-| P0.11 | empty/loading/error；鍵盤；對比；reduced-motion；demo | 完成     |                                         |
+| ID    | 需求                                                  | 狀態     | 證據                                       |
+| ----- | ----------------------------------------------------- | -------- | ------------------------------------------ |
+| P0.1★ | 點圖示一鍵存起關閉＋回饋                              | 完成     | onClicked；DECISIONS 記錄                  |
+| P0.2★ | popup 與完整清單頁                                    | 完成     | popup.html / list.html                     |
+| P0.3★ | 單筆／全部還原；預設移除設定                          | 完成     | restore + settings                         |
+| P0.4★ | Undo                                                  | 完成     | undoLastSave                               |
+| P0.5  | 特殊分頁七項實測                                      | 部分完成 | 邏輯+單元/E2E 部分；無痕/真媒體見 HANDS_ON |
+| P0.6  | 三種存入範圍                                          | 完成     | scope + UI                                 |
+| P0.7  | 搜尋／刪除／清空二次確認                              | 完成     |                                            |
+| P0.8  | JSON 匯入匯出＋摘要                                   | 完成     |                                            |
+| P0.9  | 設定頁（移除／範圍／深色／備份）                      | 完成     |                                            |
+| P0.10 | 首次引導 ≤3 步可跳過                                  | 完成     | popup onboarding                           |
+| P0.11 | empty/loading/error；鍵盤；對比；reduced-motion；demo | 完成     |                                            |
 
 ## 6 P1
 
@@ -75,11 +75,11 @@
 
 ## 7–12 設計／效能／隱私／測試／交付
 
-| ID  | 需求                                | 狀態     | 證據                                |
-| --- | ----------------------------------- | -------- | ----------------------------------- |
-| R7  | 設計研究＋自製圖示＋微互動          | 完成     | DESIGN.md + public/icons            |
-| R8  | 200ms／1000 筆／量測／無輪詢        | 部分完成 | 抽樣；1000 虛擬化未做               |
-| R9  | 本機限定、CSP、不可信文字、資料說明 | 完成     | textContent、CSP、settings          |
-| R10 | E2E／單元≥15／故障注入／限制誠實    | 完成     | 19 unit + 3 e2e + KNOWN_LIMITATIONS |
-| R11 | 每階段可建置＋嚴格型別＋小步 commit | 完成     |                                     |
-| R12 | dist＋ZIP＋文件齊全                 | 完成     |                                     |
+| ID  | 需求                                | 狀態     | 證據                                      |
+| --- | ----------------------------------- | -------- | ----------------------------------------- |
+| R7  | 設計研究＋自製圖示＋微互動          | 完成     | DESIGN.md + public/icons                  |
+| R8  | 200ms／1000 筆／量測／無輪詢        | 部分完成 | perf-samples.json；p95 可能>200；未虛擬化 |
+| R9  | 本機限定、CSP、不可信文字、資料說明 | 完成     | favicon 本機、CSP connect-src none        |
+| R10 | E2E／單元≥15／故障注入／限制誠實    | 完成     | ≥27 unit + 3 e2e；限制不含已修核心 bug    |
+| R11 | 每階段可建置＋嚴格型別＋小步 commit | 完成     |                                           |
+| R12 | dist＋ZIP＋文件齊全                 | 完成     |                                           |
