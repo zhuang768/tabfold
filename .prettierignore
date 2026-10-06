@@ -1,0 +1,6 @@
+{
+  "root": true,
+  "ignorePatterns": ["dist/**", "output/**", "node_modules/**"]
+}
+
+docs/original-requirements.md
