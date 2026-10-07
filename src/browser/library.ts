@@ -196,6 +196,46 @@ async function clearConfirm(): Promise<void> {
   }
 }
 
+const RESTORE_JOURNAL_KEY = "tabfold_restore_journal";
+const UNDO_JOURNAL_KEY = "tabfold_undo_journal";
+
+async function getJournal(key: string): Promise<Record<string, number>> {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage?.session) return {};
+    const data = await chrome.storage.session.get(key);
+    const j = data?.[key];
+    return typeof j === "object" && j !== null
+      ? (j as Record<string, number>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function recordJournalEntry(
+  key: string,
+  id: string,
+  tabId: number,
+): Promise<void> {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage?.session) return;
+    const current = await getJournal(key);
+    current[id] = tabId;
+    await chrome.storage.session.set({ [key]: current });
+  } catch {
+    // best effort
+  }
+}
+
+async function clearJournal(key: string): Promise<void> {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage?.session) return;
+    await chrome.storage.session.remove(key);
+  } catch {
+    // best effort
+  }
+}
+
 /**
  * Save pipeline: exclusive lock covers read→write→verify→close decisions.
  * Never closes until verified; concurrent saves serialize (no lost updates).
@@ -273,7 +313,9 @@ export async function saveTabs(options: {
         } catch {
           return emptySave({
             message: STRINGS.targetChanged,
-            failed: [{ title: snap.title, url: snap.url, reason: "Tab gone" }],
+            failed: [
+              { title: snap.title, url: snap.url, reason: STRINGS.tabGone },
+            ],
           });
         }
       }
@@ -301,11 +343,14 @@ export async function saveTabs(options: {
       if (!anchor?.windowId) {
         return emptySave({
           message: STRINGS.nothingSaved,
-          failed: [{ title: "Unknown", url: "", reason: "No active tab" }],
+          failed: [{ title: "Unknown", url: "", reason: STRINGS.noActiveTab }],
         });
       }
       // Refuse silently saving the extension's own pages as "current"
-      if (anchor.url?.startsWith(`chrome-extension://${chrome.runtime.id}`)) {
+      if (
+        options.scope === "current" &&
+        anchor.url?.startsWith(`chrome-extension://${chrome.runtime.id}`)
+      ) {
         return emptySave({ message: STRINGS.pickWebTab });
       }
       anchorWindowId = anchor.windowId;
@@ -317,30 +362,8 @@ export async function saveTabs(options: {
       ) as chrome.tabs.Tab[];
     }
 
-    // Unsaved-content ack before any close (bound to exact target tabs)
-    if (!db.settings.unsavedHintAcknowledged && !options.confirmedUnsaved) {
-      const token = createId("cfm");
-      await storeConfirm({
-        token,
-        tabSnapshots: selected.map((t) => ({
-          tabId: t.id!,
-          url: t.url ?? "",
-          title: t.title || t.url || "Untitled",
-          audible: Boolean(t.audible),
-        })),
-        scope: options.scope,
-        expiresAt: Date.now() + 120_000,
-      });
-      return emptySave({
-        message: STRINGS.unsavedHintBefore,
-        needsUnsavedAck: true,
-        confirmToken: token,
-      });
-    }
-
-    const needsConfirmation: SaveResult["needsConfirmation"] = [];
     const skipped: SaveResult["skipped"] = [];
-    const candidates: chrome.tabs.Tab[] = [];
+    const eligibleTabs: chrome.tabs.Tab[] = [];
     const seenUrls = new Set<string>();
 
     for (const tab of selected) {
@@ -369,16 +392,59 @@ export async function saveTabs(options: {
         skipped.push({ title, url, reason: STRINGS.duplicateUrl });
         continue;
       }
+      seenUrls.add(url);
+      eligibleTabs.push(tab);
+    }
+
+    if (eligibleTabs.length === 0) {
+      return emptySave({
+        message: skipped.length
+          ? (skipped[0]?.reason ?? STRINGS.nothingSaved)
+          : STRINGS.nothingSaved,
+        skipped,
+      });
+    }
+
+    // Unsaved-content ack before any close (bound to exact target tabs)
+    if (
+      !db.settings.unsavedHintAcknowledged &&
+      (!bound || !options.confirmedUnsaved)
+    ) {
+      const token = createId("cfm");
+      await storeConfirm({
+        token,
+        tabSnapshots: eligibleTabs.map((t) => ({
+          tabId: t.id!,
+          url: t.url ?? "",
+          title: t.title || t.url || "Untitled",
+          audible: Boolean(t.audible),
+        })),
+        scope: options.scope,
+        expiresAt: Date.now() + 120_000,
+      });
+      return emptySave({
+        message: STRINGS.unsavedHintBefore,
+        needsUnsavedAck: true,
+        confirmToken: token,
+        skipped,
+      });
+    }
+
+    const needsConfirmation: SaveResult["needsConfirmation"] = [];
+    const candidates: chrome.tabs.Tab[] = [];
+
+    for (const tab of eligibleTabs) {
+      const url = tab.url ?? "";
+      const title = tab.title || url || "Untitled";
       if (tab.audible && (!bound || !options.confirmedAudio)) {
         needsConfirmation.push({
-          tabId: tab.id,
+          tabId: tab.id!,
           title,
           url,
           reason: STRINGS.audioConfirm,
         });
         continue;
       }
-      seenUrls.add(url);
       candidates.push(tab);
     }
 
@@ -550,6 +616,22 @@ export async function saveTabs(options: {
           });
           continue;
         }
+        if (fresh.pinned) {
+          skipped.push({
+            title: t.title || "",
+            url: t.url || "",
+            reason: STRINGS.pinnedSkip,
+          });
+          continue;
+        }
+        if (fresh.audible && !options.confirmedAudio && !bound) {
+          failed.push({
+            title: t.title || "",
+            url: t.url || "",
+            reason: STRINGS.audioConfirm,
+          });
+          continue;
+        }
         toClose.push(t.id);
       } catch {
         failed.push({
@@ -593,10 +675,33 @@ export async function saveTabs(options: {
     }
 
     let closed = 0;
+    let statsWarning = false;
     if (toClose.length && anchorWindowId != null) {
       try {
         await ensureWindowSurvives(anchorWindowId, toClose);
       } catch {
+        try {
+          const cur = await s.readDatabaseUnlocked();
+          await s.writeDatabaseUnlocked(
+            {
+              ...cur,
+              entries: cur.entries.filter(
+                (e) => !newEntries.some((n) => n.id === e.id),
+              ),
+              undo: null,
+              stats: {
+                ...cur.stats,
+                totalSaved: Math.max(
+                  0,
+                  cur.stats.totalSaved - newEntries.length,
+                ),
+              },
+            },
+            cur.revision,
+          );
+        } catch {
+          // best-effort rollback
+        }
         failed.push({
           title: "Window",
           url: "",
@@ -610,43 +715,27 @@ export async function saveTabs(options: {
           closed: 0,
         });
       }
+
+      const actuallyClosed: number[] = [];
+      const actuallyOpen: number[] = [];
       try {
         await chrome.tabs.remove(toClose);
-        closed = toClose.length;
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : STRINGS.closeFailed;
-        try {
-          const cur = await s.readDatabaseUnlocked();
-          await s.writeDatabaseUnlocked(
-            {
-              ...cur,
-              undo: null,
-            },
-            cur.revision,
-          );
-        } catch {
-          // best effort
+        actuallyClosed.push(...toClose);
+      } catch {
+        for (const tabId of toClose) {
+          try {
+            await chrome.tabs.get(tabId);
+            actuallyOpen.push(tabId);
+          } catch {
+            actuallyClosed.push(tabId);
+          }
         }
-        return {
-          saved: idsToKeep.length,
-          closed: 0,
-          skipped,
-          failed: [
-            ...failed,
-            ...toClose.map((id) => {
-              const ent = entryByTabId.get(id);
-              return {
-                title: ent?.title || "",
-                url: ent?.url || "",
-                reason,
-              };
-            }),
-          ],
-          needsConfirmation: [],
-          undoIds: [],
-          message: `${STRINGS.closeFailed} Data was saved; tabs may still be open.`,
-        };
       }
+      closed = actuallyClosed.length;
+
+      const actuallyClosedEntryIds = actuallyClosed
+        .map((id) => entryByTabId.get(id)?.id)
+        .filter((x): x is string => Boolean(x));
 
       try {
         const cur = await s.readDatabaseUnlocked();
@@ -657,14 +746,38 @@ export async function saveTabs(options: {
               ...cur.stats,
               totalClosed: cur.stats.totalClosed + closed,
             },
-            undo: idsToKeep.length
-              ? { ids: idsToKeep, expiresAt: now + UNDO_TTL_MS }
-              : cur.undo,
+            undo: actuallyClosedEntryIds.length
+              ? { ids: actuallyClosedEntryIds, expiresAt: now + UNDO_TTL_MS }
+              : null,
           },
           cur.revision,
         );
       } catch {
-        // close already happened — report success with warning
+        statsWarning = true;
+      }
+
+      if (actuallyOpen.length) {
+        await clearConfirm();
+        await refreshBadgeFromDb();
+        return {
+          saved: idsToKeep.length,
+          closed,
+          skipped,
+          failed: [
+            ...failed,
+            ...actuallyOpen.map((id) => {
+              const ent = entryByTabId.get(id);
+              return {
+                title: ent?.title || "",
+                url: ent?.url || "",
+                reason: STRINGS.closeFailed,
+              };
+            }),
+          ],
+          needsConfirmation: [],
+          undoIds: actuallyClosedEntryIds,
+          message: `${STRINGS.closeFailed} Data was saved; tabs may still be open.${statsWarning ? " (Warning: stats could not be updated)" : ""}`,
+        };
       }
     }
 
@@ -673,7 +786,7 @@ export async function saveTabs(options: {
 
     const saved = idsToKeep.length;
     const totalAttempt = candidates.length;
-    const message =
+    let message =
       saved === 0
         ? STRINGS.nothingSaved
         : saved === totalAttempt
@@ -681,6 +794,9 @@ export async function saveTabs(options: {
             ? STRINGS.savedOne
             : STRINGS.savedN(saved)
           : STRINGS.savedPartial(saved, totalAttempt);
+    if (statsWarning) {
+      message += " (Warning: stats could not be updated)";
+    }
 
     return {
       saved,
@@ -754,16 +870,25 @@ export async function restoreEntries(
     let opened = 0;
     let failed = 0;
     const openedIds: string[] = [];
+    const journal = await getJournal(RESTORE_JOURNAL_KEY);
 
     for (let i = 0; i < ordered.length; i++) {
       const entry = ordered[i]!;
       if (batch && i > 0 && i % batchSize === 0) {
         await new Promise((r) => setTimeout(r, 400));
       }
+      if (journal[entry.id]) {
+        opened += 1;
+        openedIds.push(entry.id);
+        continue;
+      }
       const tab = await createTabSafe(entry, entry.source.windowId);
       if (tab) {
         opened += 1;
         openedIds.push(entry.id);
+        if (tab.id != null) {
+          await recordJournalEntry(RESTORE_JOURNAL_KEY, entry.id, tab.id);
+        }
       } else {
         failed += 1;
       }
@@ -794,6 +919,7 @@ export async function restoreEntries(
           },
           cur.revision,
         );
+        await clearJournal(RESTORE_JOURNAL_KEY);
       } else if (opened) {
         await s.writeDatabaseUnlocked(
           {
@@ -805,6 +931,7 @@ export async function restoreEntries(
           },
           cur.revision,
         );
+        await clearJournal(RESTORE_JOURNAL_KEY);
       }
     } catch (e) {
       await refreshBadgeFromDb();
@@ -841,10 +968,21 @@ export async function undoLastSave(): Promise<{
     const entries = db.entries.filter((e) => ids.includes(e.id));
     const openedIds: string[] = [];
     const failedIds: string[] = [];
+    const journal = await getJournal(UNDO_JOURNAL_KEY);
     for (const entry of entries) {
+      if (journal[entry.id]) {
+        openedIds.push(entry.id);
+        continue;
+      }
       const tab = await createTabSafe(entry);
-      if (tab) openedIds.push(entry.id);
-      else failedIds.push(entry.id);
+      if (tab) {
+        openedIds.push(entry.id);
+        if (tab.id != null) {
+          await recordJournalEntry(UNDO_JOURNAL_KEY, entry.id, tab.id);
+        }
+      } else {
+        failedIds.push(entry.id);
+      }
     }
     const cur = await s.readDatabaseUnlocked();
     await s.writeDatabaseUnlocked(
@@ -858,6 +996,7 @@ export async function undoLastSave(): Promise<{
       },
       cur.revision,
     );
+    await clearJournal(UNDO_JOURNAL_KEY);
     await refreshBadgeFromDb();
     if (!openedIds.length) {
       return {
@@ -905,11 +1044,13 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "save": {
         let scope: SaveScope = "current";
-        if (req.scope != null && (req.scope as unknown) !== "") {
+        if (req.scope !== undefined) {
           if (!isValidScope(req.scope)) {
             return { ok: false, error: "Invalid save scope." };
           }
           scope = req.scope;
+        } else if (req.confirmToken) {
+          scope = "current";
         } else {
           try {
             const db = await s.readDatabase();
@@ -982,6 +1123,83 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { reset: true } };
       }
       case "patch-settings": {
+        if (!req.patch || typeof req.patch !== "object") {
+          return { ok: false, error: "Invalid settings patch." };
+        }
+        const allowedKeys = new Set([
+          "removeAfterRestore",
+          "defaultScope",
+          "theme",
+          "whitelist",
+          "onboardingComplete",
+          "unsavedHintAcknowledged",
+          "restoreBatchSize",
+        ]);
+        for (const k of Object.keys(req.patch)) {
+          if (!allowedKeys.has(k)) {
+            return { ok: false, error: `Unknown settings key: ${k}` };
+          }
+        }
+        const patch = req.patch;
+        if (
+          patch.removeAfterRestore !== undefined &&
+          typeof patch.removeAfterRestore !== "boolean"
+        ) {
+          return { ok: false, error: "removeAfterRestore must be boolean." };
+        }
+        if (
+          patch.defaultScope !== undefined &&
+          !isValidScope(patch.defaultScope)
+        ) {
+          return { ok: false, error: "Invalid defaultScope." };
+        }
+        if (
+          patch.theme !== undefined &&
+          patch.theme !== "light" &&
+          patch.theme !== "dark" &&
+          patch.theme !== "system"
+        ) {
+          return { ok: false, error: "Invalid theme." };
+        }
+        if (patch.whitelist !== undefined) {
+          if (
+            !Array.isArray(patch.whitelist) ||
+            patch.whitelist.some((x) => typeof x !== "string")
+          ) {
+            return {
+              ok: false,
+              error: "whitelist must be an array of strings.",
+            };
+          }
+        }
+        if (
+          patch.onboardingComplete !== undefined &&
+          typeof patch.onboardingComplete !== "boolean"
+        ) {
+          return { ok: false, error: "onboardingComplete must be boolean." };
+        }
+        if (
+          patch.unsavedHintAcknowledged !== undefined &&
+          typeof patch.unsavedHintAcknowledged !== "boolean"
+        ) {
+          return {
+            ok: false,
+            error: "unsavedHintAcknowledged must be boolean.",
+          };
+        }
+        if (patch.restoreBatchSize !== undefined) {
+          if (
+            typeof patch.restoreBatchSize !== "number" ||
+            !Number.isFinite(patch.restoreBatchSize) ||
+            patch.restoreBatchSize < 1 ||
+            patch.restoreBatchSize > 500
+          ) {
+            return {
+              ok: false,
+              error: "restoreBatchSize must be a number between 1 and 500.",
+            };
+          }
+        }
         await withMutationWrite((db) => ({
           ...db,
           settings: {

@@ -63,24 +63,43 @@ function parseUndo(raw: unknown, now: number): UndoState | null {
 
 function migrateEntryStrict(
   raw: unknown,
-  opts: { requireId: boolean; allowGenerateStableId: boolean },
+  opts: {
+    requireId: boolean;
+    allowGenerateStableId: boolean;
+    strictCurrent?: boolean;
+  },
 ): { entry: SavedTab } | { invalid: true; reason: string } {
   if (!isRecord(raw)) return { invalid: true, reason: "entry not object" };
-  const version = asNumber(raw.schemaVersion, SCHEMA_VERSION);
-  if (version > SCHEMA_VERSION) {
-    return {
-      invalid: true,
-      reason: `unsupported entry schemaVersion: ${version}`,
-    };
+  if (raw.schemaVersion !== undefined) {
+    if (
+      typeof raw.schemaVersion !== "number" ||
+      raw.schemaVersion !== SCHEMA_VERSION
+    ) {
+      return {
+        invalid: true,
+        reason: `unsupported entry schemaVersion: ${String(raw.schemaVersion)}`,
+      };
+    }
+  } else if (opts.strictCurrent) {
+    return { invalid: true, reason: "missing entry schemaVersion" };
   }
+
   const url = asString(raw.url).trim();
   if (!url || !isAllowedPersistUrl(url)) {
     return { invalid: true, reason: `invalid url: ${url || "(empty)"}` };
   }
-  if (raw.title !== undefined && typeof raw.title !== "string") {
-    return { invalid: true, reason: "title must be a string" };
+
+  if (opts.strictCurrent) {
+    if (typeof raw.title !== "string") {
+      return { invalid: true, reason: "title must be a string" };
+    }
+  } else {
+    if (raw.title !== undefined && typeof raw.title !== "string") {
+      return { invalid: true, reason: "title must be a string" };
+    }
   }
   const title = asString(raw.title, url);
+
   if (
     typeof raw.savedAt !== "number" ||
     !Number.isFinite(raw.savedAt) ||
@@ -101,16 +120,68 @@ function migrateEntryStrict(
     }
   }
 
+  if (opts.strictCurrent) {
+    if (raw.favicon !== null && typeof raw.favicon !== "string") {
+      return { invalid: true, reason: "favicon must be a string or null" };
+    }
+    if (raw.status !== "saved") {
+      return {
+        invalid: true,
+        reason: `status must be "saved", got ${String(raw.status)}`,
+      };
+    }
+  } else {
+    if (
+      raw.favicon !== undefined &&
+      raw.favicon !== null &&
+      typeof raw.favicon !== "string"
+    ) {
+      return { invalid: true, reason: "favicon must be a string or null" };
+    }
+    if (raw.status !== undefined && raw.status !== "saved") {
+      return { invalid: true, reason: `invalid status: ${String(raw.status)}` };
+    }
+  }
+  const favicon = typeof raw.favicon === "string" ? raw.favicon : null;
+
   const sourceRaw = isRecord(raw.source) ? raw.source : null;
   if (!sourceRaw) return { invalid: true, reason: "missing source" };
+
+  if (opts.strictCurrent) {
+    if (
+      typeof sourceRaw.windowId !== "number" ||
+      !Number.isFinite(sourceRaw.windowId)
+    ) {
+      return { invalid: true, reason: "source.windowId must be a number" };
+    }
+    if (
+      typeof sourceRaw.index !== "number" ||
+      !Number.isFinite(sourceRaw.index)
+    ) {
+      return { invalid: true, reason: "source.index must be a number" };
+    }
+    if (typeof sourceRaw.pinned !== "boolean") {
+      return { invalid: true, reason: "source.pinned must be a boolean" };
+    }
+  }
+
   const source: SavedTab["source"] = {
     windowId: asNumber(sourceRaw.windowId, -1),
     index: asNumber(sourceRaw.index, 0),
     pinned: asBool(sourceRaw.pinned, false),
   };
-  if (typeof sourceRaw.muted === "boolean") source.muted = sourceRaw.muted;
-  if (typeof sourceRaw.audible === "boolean")
+  if (sourceRaw.muted !== undefined) {
+    if (typeof sourceRaw.muted !== "boolean") {
+      return { invalid: true, reason: "source.muted must be a boolean" };
+    }
+    source.muted = sourceRaw.muted;
+  }
+  if (sourceRaw.audible !== undefined) {
+    if (typeof sourceRaw.audible !== "boolean") {
+      return { invalid: true, reason: "source.audible must be a boolean" };
+    }
     source.audible = sourceRaw.audible;
+  }
 
   if (raw.tags !== undefined) {
     if (
@@ -133,7 +204,7 @@ function migrateEntryStrict(
       id,
       url,
       title,
-      favicon: typeof raw.favicon === "string" ? raw.favicon : null,
+      favicon,
       savedAt,
       source,
       group,
@@ -196,8 +267,13 @@ function migrateStats(raw: unknown, entryCount: number): Database["stats"] {
 export function migrateDatabase(
   raw: unknown,
   nowOrOptions:
-    number | { now?: number; allowDuplicateIds?: boolean } = Date.now(),
-  options?: { allowDuplicateIds?: boolean },
+    | number
+    | {
+        now?: number;
+        allowDuplicateIds?: boolean;
+        strictCurrent?: boolean;
+      } = Date.now(),
+  options?: { allowDuplicateIds?: boolean; strictCurrent?: boolean },
 ): MigrateResult {
   const now =
     typeof nowOrOptions === "number"
@@ -212,6 +288,14 @@ export function migrateDatabase(
   }
   if (!isRecord(raw)) {
     throw new CorruptDatabaseError("Database root is not an object", raw);
+  }
+
+  if (
+    raw.schemaVersion !== undefined &&
+    (typeof raw.schemaVersion !== "number" ||
+      !Number.isFinite(raw.schemaVersion))
+  ) {
+    throw new CorruptDatabaseError("schemaVersion must be a number", raw);
   }
 
   const version = asNumber(raw.schemaVersion, 0);
@@ -292,6 +376,7 @@ export function migrateDatabase(
     const r = migrateEntryStrict(item, {
       requireId: version === SCHEMA_VERSION,
       allowGenerateStableId: version < SCHEMA_VERSION,
+      strictCurrent: version === SCHEMA_VERSION,
     });
     if ("invalid" in r) {
       throw new CorruptDatabaseError(`Invalid entry: ${r.reason}`, raw);

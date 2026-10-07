@@ -241,7 +241,7 @@ export class LibraryStore {
         // Persist migration under exclusive lock so ids stay stable
         await this.exclusive(async () => {
           const again = await this.driver.get([DB_KEY]);
-          const currentRaw = again[DB_KEY];
+          const currentRaw = again[DB_KEY] ?? raw;
           const currentVer =
             typeof (currentRaw as Record<string, unknown> | null)
               ?.schemaVersion === "number"
@@ -249,7 +249,17 @@ export class LibraryStore {
                   .schemaVersion as number)
               : 0;
           if (currentVer < result.database.schemaVersion) {
-            await this.driver.set({ [DB_KEY]: result.database });
+            await this.driver.set({
+              [SALVAGE_KEY]: currentRaw,
+              [DB_KEY]: result.database,
+            });
+          }
+          const readBackRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
+          const readBackResult = migrateDatabase(readBackRaw);
+          if (
+            !databaseContentMatches(result.database, readBackResult.database)
+          ) {
+            throw new Error("Migrated database content mismatch on read-back");
           }
         });
         return result.database;
@@ -257,11 +267,17 @@ export class LibraryStore {
       return result.database;
     } catch (e) {
       if (e instanceof MigrationError) {
-        await this.driver.set({ [CORRUPT_KEY]: raw, [SALVAGE_KEY]: raw });
+        const existingSalvage = data[SALVAGE_KEY];
+        const toSet: Record<string, unknown> = { [CORRUPT_KEY]: raw };
+        if (existingSalvage == null) toSet[SALVAGE_KEY] = raw;
+        await this.driver.set(toSet);
         throw new CorruptDataError(e.message, raw);
       }
       if (e instanceof CorruptDatabaseError) {
-        await this.driver.set({ [CORRUPT_KEY]: raw, [SALVAGE_KEY]: raw });
+        const existingSalvage = data[SALVAGE_KEY];
+        const toSet: Record<string, unknown> = { [CORRUPT_KEY]: raw };
+        if (existingSalvage == null) toSet[SALVAGE_KEY] = raw;
+        await this.driver.set(toSet);
         // Keep DB_KEY so raw export still sees both; UI treats as corrupt
         throw new CorruptDataError(e.message, e.raw);
       }
@@ -333,21 +349,32 @@ export class LibraryStore {
       const result = migrateDatabase(raw);
       if (result.didMigrate) {
         const again = await this.driver.get([DB_KEY]);
-        const currentRaw = again[DB_KEY];
+        const currentRaw = again[DB_KEY] ?? raw;
         const currentVer =
           typeof (currentRaw as Record<string, unknown> | null)
             ?.schemaVersion === "number"
             ? ((currentRaw as Record<string, unknown>).schemaVersion as number)
             : 0;
         if (currentVer < result.database.schemaVersion) {
-          await this.driver.set({ [DB_KEY]: result.database });
+          await this.driver.set({
+            [SALVAGE_KEY]: currentRaw,
+            [DB_KEY]: result.database,
+          });
         }
-        return result.database;
+        const readBackRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
+        const readBackResult = migrateDatabase(readBackRaw);
+        if (!databaseContentMatches(result.database, readBackResult.database)) {
+          throw new Error("Migrated database content mismatch on read-back");
+        }
+        return readBackResult.database;
       }
       return result.database;
     } catch (e) {
       if (e instanceof MigrationError || e instanceof CorruptDatabaseError) {
-        await this.driver.set({ [CORRUPT_KEY]: raw, [SALVAGE_KEY]: raw });
+        const existingSalvage = data[SALVAGE_KEY];
+        const toSet: Record<string, unknown> = { [CORRUPT_KEY]: raw };
+        if (existingSalvage == null) toSet[SALVAGE_KEY] = raw;
+        await this.driver.set(toSet);
         throw new CorruptDataError(
           e instanceof Error ? e.message : "Corrupt database",
           raw,
@@ -427,7 +454,15 @@ export class LibraryStore {
     // Preserve current raw before restore (even if corrupt) in durable salvage
     const currentRaw = data[DB_KEY] ?? data[CORRUPT_KEY] ?? data[SALVAGE_KEY];
     if (currentRaw != null) {
-      await this.driver.set({ [SALVAGE_KEY]: currentRaw });
+      let isCurrentCorrupt = false;
+      try {
+        migrateDatabase(currentRaw);
+      } catch {
+        isCurrentCorrupt = true;
+      }
+      if (data[SALVAGE_KEY] == null || isCurrentCorrupt) {
+        await this.driver.set({ [SALVAGE_KEY]: currentRaw });
+      }
       try {
         const cur = migrateDatabase(currentRaw).database;
         const snap: Snapshot = {
@@ -439,9 +474,7 @@ export class LibraryStore {
         const next = [snap, ...existing].slice(0, MAX_BACKUPS);
         await this.driver.set({ [BACKUPS_KEY]: next });
       } catch {
-        await this.driver.set({
-          [SALVAGE_KEY]: currentRaw,
-        });
+        // if corrupt, already recorded in salvage
       }
     }
 
@@ -460,6 +493,12 @@ export class LibraryStore {
 
     const readBack = await this.readDatabaseUnlocked();
     if (!databaseContentMatches(restored, readBack)) {
+      if (data[DB_KEY] !== undefined) {
+        await this.driver.set({ [DB_KEY]: data[DB_KEY] });
+      }
+      if (data[CORRUPT_KEY] !== undefined) {
+        await this.driver.set({ [CORRUPT_KEY]: data[CORRUPT_KEY] });
+      }
       throw new Error("Restored database content mismatch");
     }
 

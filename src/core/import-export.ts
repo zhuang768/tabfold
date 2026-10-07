@@ -29,7 +29,9 @@ export function buildExportPayload(db: Database): ExportPayload {
       defaultScope: db.settings.defaultScope,
       theme: db.settings.theme,
       whitelist: [...db.settings.whitelist],
+      onboardingComplete: db.settings.onboardingComplete,
       unsavedHintAcknowledged: db.settings.unsavedHintAcknowledged,
+      restoreBatchSize: db.settings.restoreBatchSize,
     },
   };
 }
