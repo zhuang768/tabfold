@@ -32,6 +32,7 @@ import {
   UNDO_TTL_MS,
   type SavedTab,
   type SaveScope,
+  type Settings,
 } from "../../src/types.js";
 import {
   LibraryStore,
