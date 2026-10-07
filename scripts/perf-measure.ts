@@ -17,11 +17,13 @@ fs.cpSync(repoDist, dist, { recursive: true });
 const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "tabfold-perf-ud-"));
 
 const context = await chromium.launchPersistentContext(userDataDir, {
-  headless: false,
+  headless: true,
+  channel: "chromium",
   args: [
     `--disable-extensions-except=${dist}`,
     `--load-extension=${dist}`,
     "--no-first-run",
+    "--no-default-browser-check",
   ],
 });
 let sw = context.serviceWorkers()[0];
@@ -104,11 +106,22 @@ for (let i = 0; i < 30; i++) {
   await p.goto(`chrome-extension://${extensionId}/popup.html`, {
     waitUntil: "domcontentloaded",
   });
-  // Verify true interactive ready: button text populated by init()
+  // Verify true interactive ready: scope populated, count rendered, loading gone, list populated
   await p.waitForFunction(
     () => {
-      const btn = document.getElementById("btn-save");
-      return btn && btn.textContent && btn.textContent.trim().length > 0;
+      const scope = document.getElementById("scope") as HTMLSelectElement;
+      const count = document.getElementById("count");
+      const loading = document.querySelector(".loading");
+      const entries = document.querySelectorAll(".entry");
+      return (
+        scope &&
+        scope.options.length === 3 &&
+        count &&
+        count.textContent &&
+        count.textContent.length > 0 &&
+        !loading &&
+        entries.length > 0
+      );
     },
     { timeout: 10_000 },
   );
@@ -125,7 +138,7 @@ const report = {
   measuredAt: new Date().toISOString(),
   browser: "Playwright Chromium (bundled)",
   conditions:
-    "1000 imported entries, headed, 30 sequential popup samples measuring true interactive init",
+    "1000 imported entries, headless Chromium, 30 sequential popup samples measuring true interactive ready init",
   entryCountRendered: entryCount,
   filteredCountAfterSearch: filteredCount,
   popupOpenToSaveInteractiveMs: {
