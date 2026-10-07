@@ -20,7 +20,11 @@ import {
   isSavableUrl,
   isWhitelisted,
 } from "../core/tabs-logic.js";
-import { selectTabsForScope, type TabLike } from "../core/scope.js";
+import {
+  selectTabsForScope,
+  isValidScope,
+  type TabLike,
+} from "../core/scope.js";
 import {
   exportJsonString,
   importJsonText,
@@ -46,7 +50,12 @@ function getStore(): LibraryStore {
 
 interface ConfirmPayload {
   token: string;
-  tabSnapshots: Array<{ tabId: number; url: string; title: string }>;
+  tabSnapshots: Array<{
+    tabId: number;
+    url: string;
+    title: string;
+    audible?: boolean;
+  }>;
   scope: SaveScope;
   expiresAt: number;
 }
@@ -81,7 +90,7 @@ async function withMutationWrite(
         opts.backupReason.includes("reset") ||
         db.entries.length >= 20;
       if (bulk) {
-        await s.createBackup(opts.backupReason, db);
+        await s.createBackupUnlocked(opts.backupReason, db);
       }
     }
     const next = mutate(structuredClone(db));
@@ -113,29 +122,34 @@ function tabToEntry(tab: chrome.tabs.Tab, now: number): SavedTab {
 }
 
 export async function updateBadge(count: number): Promise<void> {
+  if (typeof chrome === "undefined" || !chrome.action?.setBadgeText) return;
   const text =
     count <= 0 ? "" : count > 999 ? STRINGS.badgeOverflow : String(count);
   await chrome.action.setBadgeText({ text });
-  await chrome.action.setBadgeBackgroundColor({ color: "#2F3437" });
-  try {
-    await chrome.action.setIcon({
-      path:
-        count > 0
-          ? {
-              16: "icons/icon-16-active.png",
-              32: "icons/icon-32-active.png",
-              48: "icons/icon-48-active.png",
-              128: "icons/icon-128-active.png",
-            }
-          : {
-              16: "icons/icon-16.png",
-              32: "icons/icon-32.png",
-              48: "icons/icon-48.png",
-              128: "icons/icon-128.png",
-            },
-    });
-  } catch {
-    // ignore missing icons in tests
+  if (chrome.action.setBadgeBackgroundColor) {
+    await chrome.action.setBadgeBackgroundColor({ color: "#2F3437" });
+  }
+  if (chrome.action.setIcon) {
+    try {
+      await chrome.action.setIcon({
+        path:
+          count > 0
+            ? {
+                16: "icons/icon-16-active.png",
+                32: "icons/icon-32-active.png",
+                48: "icons/icon-48-active.png",
+                128: "icons/icon-128-active.png",
+              }
+            : {
+                16: "icons/icon-16.png",
+                32: "icons/icon-32.png",
+                48: "icons/icon-48.png",
+                128: "icons/icon-128.png",
+              },
+      });
+    } catch {
+      // ignore missing icons in tests
+    }
   }
 }
 
@@ -204,14 +218,11 @@ export async function saveTabs(options: {
       if (!bound) {
         return emptySave({ message: STRINGS.confirmExpired });
       }
+      await clearConfirm();
     }
 
-    // Unsaved-content ack before any close (first dangerous op)
-    if (!db.settings.unsavedHintAcknowledged && !options.confirmedUnsaved) {
-      return emptySave({
-        message: STRINGS.unsavedHintBefore,
-        needsUnsavedAck: true,
-      });
+    if (!isValidScope(options.scope) && !bound && !options.tabIds?.length) {
+      return emptySave({ message: "Invalid save scope." });
     }
 
     let selected: chrome.tabs.Tab[] = [];
@@ -279,7 +290,7 @@ export async function saveTabs(options: {
     } else {
       let anchor: chrome.tabs.Tab | undefined;
       if (options.tabId != null) {
-        anchor = await chrome.tabs.get(options.tabId);
+        anchor = await chrome.tabs.get(options.tabId).catch(() => undefined);
       } else {
         const [active] = await chrome.tabs.query({
           active: true,
@@ -304,6 +315,27 @@ export async function saveTabs(options: {
         options.scope,
         anchor.id,
       ) as chrome.tabs.Tab[];
+    }
+
+    // Unsaved-content ack before any close (bound to exact target tabs)
+    if (!db.settings.unsavedHintAcknowledged && !options.confirmedUnsaved) {
+      const token = createId("cfm");
+      await storeConfirm({
+        token,
+        tabSnapshots: selected.map((t) => ({
+          tabId: t.id!,
+          url: t.url ?? "",
+          title: t.title || t.url || "Untitled",
+          audible: Boolean(t.audible),
+        })),
+        scope: options.scope,
+        expiresAt: Date.now() + 120_000,
+      });
+      return emptySave({
+        message: STRINGS.unsavedHintBefore,
+        needsUnsavedAck: true,
+        confirmToken: token,
+      });
     }
 
     const needsConfirmation: SaveResult["needsConfirmation"] = [];
@@ -337,7 +369,7 @@ export async function saveTabs(options: {
         skipped.push({ title, url, reason: STRINGS.duplicateUrl });
         continue;
       }
-      if (tab.audible && !options.confirmedAudio && !bound) {
+      if (tab.audible && (!bound || !options.confirmedAudio)) {
         needsConfirmation.push({
           tabId: tab.id,
           title,
@@ -354,11 +386,20 @@ export async function saveTabs(options: {
       const token = createId("cfm");
       await storeConfirm({
         token,
-        tabSnapshots: needsConfirmation.map((n) => ({
-          tabId: n.tabId,
-          url: n.url,
-          title: n.title,
-        })),
+        tabSnapshots: [
+          ...candidates.map((c) => ({
+            tabId: c.id!,
+            url: c.url ?? "",
+            title: c.title || c.url || "Untitled",
+            audible: false,
+          })),
+          ...needsConfirmation.map((n) => ({
+            tabId: n.tabId,
+            url: n.url,
+            title: n.title,
+            audible: true,
+          })),
+        ],
         scope: options.scope,
         expiresAt: Date.now() + 120_000,
       });
@@ -574,7 +615,18 @@ export async function saveTabs(options: {
         closed = toClose.length;
       } catch (e) {
         const reason = e instanceof Error ? e.message : STRINGS.closeFailed;
-        // Entries remain; user can restore manually — report honestly
+        try {
+          const cur = await s.readDatabaseUnlocked();
+          await s.writeDatabaseUnlocked(
+            {
+              ...cur,
+              undo: null,
+            },
+            cur.revision,
+          );
+        } catch {
+          // best effort
+        }
         return {
           saved: idsToKeep.length,
           closed: 0,
@@ -591,7 +643,7 @@ export async function saveTabs(options: {
             }),
           ],
           needsConfirmation: [],
-          undoIds: idsToKeep,
+          undoIds: [],
           message: `${STRINGS.closeFailed} Data was saved; tabs may still be open.`,
         };
       }
@@ -721,9 +773,15 @@ export async function restoreEntries(
     try {
       const cur = await s.readDatabaseUnlocked();
       if (db.settings.removeAfterRestore && openedIds.length) {
-        const nextEntries = cur.entries.filter(
-          (e) => !openedIds.includes(e.id),
-        );
+        const toRemove = [...openedIds];
+        const nextEntries = cur.entries.filter((e) => {
+          const idx = toRemove.indexOf(e.id);
+          if (idx !== -1) {
+            toRemove.splice(idx, 1);
+            return false;
+          }
+          return true;
+        });
         removed = cur.entries.length - nextEntries.length;
         await s.writeDatabaseUnlocked(
           {
@@ -847,11 +905,20 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "save": {
         let scope: SaveScope = "current";
-        try {
-          const db = await s.readDatabase();
-          scope = req.scope ?? db.settings.defaultScope;
-        } catch {
-          scope = req.scope ?? "current";
+        if (req.scope != null && (req.scope as unknown) !== "") {
+          if (!isValidScope(req.scope)) {
+            return { ok: false, error: "Invalid save scope." };
+          }
+          scope = req.scope;
+        } else {
+          try {
+            const db = await s.readDatabase();
+            scope = isValidScope(db.settings.defaultScope)
+              ? db.settings.defaultScope
+              : "current";
+          } catch {
+            scope = "current";
+          }
         }
         const saveOpts: Parameters<typeof saveTabs>[0] = { scope };
         if (req.tabId != null) saveOpts.tabId = req.tabId;
@@ -949,6 +1016,10 @@ export async function handleRequest(req: Request): Promise<Response> {
             return {
               ...db,
               entries: result.entries,
+              settings:
+                result.settings && db.entries.length === 0
+                  ? { ...db.settings, ...result.settings }
+                  : db.settings,
               stats: {
                 ...db.stats,
                 totalImported: db.stats.totalImported + result.summary.added,
@@ -1022,9 +1093,17 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { message: STRINGS.demoLoaded } };
       }
       case "discard-tab": {
-        const tab = await chrome.tabs.get(req.tabId);
+        if (typeof req.tabId !== "number") {
+          return { ok: false, error: "Missing tabId." };
+        }
+        const tab = await chrome.tabs.get(req.tabId).catch(() => null);
+        if (!tab) return { ok: false, error: "Tab not found." };
+        if (tab.active) {
+          return { ok: false, error: "Cannot hibernate active tab." };
+        }
         if (tab.pinned) return { ok: false, error: STRINGS.pinnedSkip };
-        if (tab.audible) return { ok: false, error: STRINGS.audioConfirm };
+        if (tab.audible)
+          return { ok: false, error: "Cannot hibernate media tabs." };
         if (
           isWhitelisted(
             tab.url ?? "",
@@ -1036,8 +1115,9 @@ export async function handleRequest(req: Request): Promise<Response> {
         if (tab.url?.startsWith(`chrome-extension://${chrome.runtime.id}`)) {
           return { ok: false, error: STRINGS.pickWebTab };
         }
-        const discarded = await chrome.tabs.discard(req.tabId);
-        const ok = Boolean(discarded?.discarded || discarded?.id);
+        await chrome.tabs.discard(req.tabId);
+        const check = await chrome.tabs.get(req.tabId).catch(() => null);
+        const ok = Boolean(check?.discarded);
         return ok
           ? { ok: true, data: { discarded: true, tabId: req.tabId } }
           : { ok: false, error: STRINGS.hibernateFailed };
@@ -1056,6 +1136,7 @@ export async function handleRequest(req: Request): Promise<Response> {
             id: t.id!,
             title: t.title || t.url || "",
             url: t.url!,
+            active: Boolean(t.active),
             pinned: Boolean(t.pinned),
             audible: Boolean(t.audible),
             discarded: Boolean(t.discarded),

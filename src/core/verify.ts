@@ -26,7 +26,7 @@ export function verifyEntriesPresent(
   return { ok: true };
 }
 
-/** Deep-ish snapshot compare used after write read-back. */
+/** Deep comparison used after write read-back: entries, settings, stats, and undo state. */
 export function databaseContentMatches(
   written: Database,
   read: Database,
@@ -34,9 +34,26 @@ export function databaseContentMatches(
   if (written.revision !== read.revision) return false;
   if (written.schemaVersion !== read.schemaVersion) return false;
   if (written.entries.length !== read.entries.length) return false;
-  for (const e of written.entries) {
-    const f = read.entries.find((x) => x.id === e.id);
+  for (let i = 0; i < written.entries.length; i++) {
+    const e = written.entries[i]!;
+    const f = read.entries[i];
     if (!f || !entriesEqualForVerify(e, f)) return false;
+  }
+  if (JSON.stringify(written.settings) !== JSON.stringify(read.settings)) {
+    return false;
+  }
+  if (JSON.stringify(written.stats) !== JSON.stringify(read.stats)) {
+    return false;
+  }
+  if (written.undo === null) {
+    if (read.undo !== null) return false;
+  } else {
+    if (read.undo === null) return false;
+    if (written.undo.expiresAt !== read.undo.expiresAt) return false;
+    if (written.undo.ids.length !== read.undo.ids.length) return false;
+    for (let i = 0; i < written.undo.ids.length; i++) {
+      if (written.undo.ids[i] !== read.undo.ids[i]) return false;
+    }
   }
   return true;
 }

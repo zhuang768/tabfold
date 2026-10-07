@@ -66,13 +66,29 @@ function migrateEntryStrict(
   opts: { requireId: boolean; allowGenerateStableId: boolean },
 ): { entry: SavedTab } | { invalid: true; reason: string } {
   if (!isRecord(raw)) return { invalid: true, reason: "entry not object" };
+  const version = asNumber(raw.schemaVersion, SCHEMA_VERSION);
+  if (version > SCHEMA_VERSION) {
+    return {
+      invalid: true,
+      reason: `unsupported entry schemaVersion: ${version}`,
+    };
+  }
   const url = asString(raw.url).trim();
   if (!url || !isAllowedPersistUrl(url)) {
     return { invalid: true, reason: `invalid url: ${url || "(empty)"}` };
   }
+  if (raw.title !== undefined && typeof raw.title !== "string") {
+    return { invalid: true, reason: "title must be a string" };
+  }
   const title = asString(raw.title, url);
-  const savedAt = asNumber(raw.savedAt, 0);
-  if (!savedAt) return { invalid: true, reason: "missing savedAt" };
+  if (
+    typeof raw.savedAt !== "number" ||
+    !Number.isFinite(raw.savedAt) ||
+    raw.savedAt < 0
+  ) {
+    return { invalid: true, reason: "missing savedAt" };
+  }
+  const savedAt = raw.savedAt;
 
   let id = asString(raw.id).trim();
   if (!id) {
@@ -96,9 +112,20 @@ function migrateEntryStrict(
   if (typeof sourceRaw.audible === "boolean")
     source.audible = sourceRaw.audible;
 
-  const tags = Array.isArray(raw.tags)
-    ? raw.tags.filter((t): t is string => typeof t === "string")
-    : [];
+  if (raw.tags !== undefined) {
+    if (
+      !Array.isArray(raw.tags) ||
+      raw.tags.some((t) => typeof t !== "string")
+    ) {
+      return { invalid: true, reason: "tags must be an array of strings" };
+    }
+  }
+  const tags = Array.isArray(raw.tags) ? raw.tags : [];
+
+  if (raw.group !== undefined && typeof raw.group !== "string") {
+    return { invalid: true, reason: "group must be a string" };
+  }
+  const group = asString(raw.group, "");
 
   return {
     entry: {
@@ -109,14 +136,14 @@ function migrateEntryStrict(
       favicon: typeof raw.favicon === "string" ? raw.favicon : null,
       savedAt,
       source,
-      group: asString(raw.group, ""),
+      group,
       tags,
       status: "saved",
     },
   };
 }
 
-function migrateSettings(raw: unknown): Settings {
+export function migrateSettings(raw: unknown): Settings {
   if (!isRecord(raw)) return { ...DEFAULT_SETTINGS, whitelist: [] };
   const scope = raw.defaultScope;
   const defaultScope =
@@ -166,7 +193,20 @@ function migrateStats(raw: unknown, entryCount: number): Database["stats"] {
  * - current schema with null/non-array entries or invalid rows → CorruptDatabaseError
  * - v1 → migrate with stable ids, didMigrate=true
  */
-export function migrateDatabase(raw: unknown, now = Date.now()): MigrateResult {
+export function migrateDatabase(
+  raw: unknown,
+  nowOrOptions:
+    number | { now?: number; allowDuplicateIds?: boolean } = Date.now(),
+  options?: { allowDuplicateIds?: boolean },
+): MigrateResult {
+  const now =
+    typeof nowOrOptions === "number"
+      ? nowOrOptions
+      : (nowOrOptions?.now ?? Date.now());
+  const opts =
+    typeof nowOrOptions === "object" && nowOrOptions !== null
+      ? nowOrOptions
+      : (options ?? {});
   if (raw == null) {
     return { database: createEmptyDatabase(), didMigrate: false, warnings: [] };
   }
@@ -198,7 +238,7 @@ export function migrateDatabase(raw: unknown, now = Date.now()): MigrateResult {
         throw new CorruptDatabaseError(`v1 invalid url: ${url}`, raw);
       }
       const title = asString(t.title, url);
-      const savedAt = asNumber(t.savedAt, now - i);
+      const savedAt = asNumber(t.savedAt, 0);
       const id = asString(t.id).trim() || stableMigratedId(url, savedAt, title);
       const sourceRaw = isRecord(t.source) ? t.source : {};
       const source: SavedTab["source"] = {
@@ -247,6 +287,7 @@ export function migrateDatabase(raw: unknown, now = Date.now()): MigrateResult {
   }
 
   const entries: SavedTab[] = [];
+  const seenIds = new Set<string>();
   for (const item of raw.entries) {
     const r = migrateEntryStrict(item, {
       requireId: version === SCHEMA_VERSION,
@@ -255,6 +296,10 @@ export function migrateDatabase(raw: unknown, now = Date.now()): MigrateResult {
     if ("invalid" in r) {
       throw new CorruptDatabaseError(`Invalid entry: ${r.reason}`, raw);
     }
+    if (!opts.allowDuplicateIds && seenIds.has(r.entry.id)) {
+      throw new CorruptDatabaseError(`Duplicate entry id: ${r.entry.id}`, raw);
+    }
+    seenIds.add(r.entry.id);
     entries.push(r.entry);
   }
 

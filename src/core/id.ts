@@ -22,19 +22,12 @@ export function stableMigratedId(
 }
 
 /**
- * Conservative equality: keep hash/fragments (SPA routes differ).
- * Only trim trailing slash on non-root paths of http(s) URLs.
+ * Conservative equality: keep hash/fragments (SPA routes differ)
+ * and distinct paths (do not conflate /page with /page/).
  */
 export function normalizeUrlForDedupe(url: string): string {
   try {
-    const u = new URL(url);
-    if (
-      (u.protocol === "http:" || u.protocol === "https:") &&
-      u.pathname !== "/" &&
-      u.pathname.endsWith("/")
-    ) {
-      u.pathname = u.pathname.slice(0, -1);
-    }
+    const u = new URL(url.trim());
     return u.toString();
   } catch {
     return url.trim();

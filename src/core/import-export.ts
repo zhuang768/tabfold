@@ -4,10 +4,12 @@ import {
   type ExportPayload,
   type ImportSummary,
   type SavedTab,
+  type Settings,
 } from "../types.js";
 import { createId, urlsEqual, isAllowedPersistUrl } from "./id.js";
 import {
   migrateDatabase,
+  migrateSettings,
   MigrationError,
   CorruptDatabaseError,
 } from "./migrate.js";
@@ -63,7 +65,7 @@ function rejectImport(
 export function importJsonText(
   text: string,
   existing: SavedTab[],
-): { entries: SavedTab[]; summary: ImportSummary } {
+): { entries: SavedTab[]; summary: ImportSummary; settings?: Settings } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -73,7 +75,6 @@ export function importJsonText(
 
   let incoming: SavedTab[] = [];
   let migrated = 0;
-  const intoEmpty = existing.length === 0;
 
   try {
     if (
@@ -114,7 +115,9 @@ export function importJsonText(
         incoming = db.entries;
         migrated = incoming.length;
       } else {
-        const db = migrateDatabase(shaped).database;
+        const db = migrateDatabase(shaped, {
+          allowDuplicateIds: true,
+        }).database;
         incoming = db.entries;
         if (schemaVersion < SCHEMA_VERSION) migrated = incoming.length;
       }
@@ -128,7 +131,7 @@ export function importJsonText(
       incoming = db.entries;
       migrated = incoming.length;
     } else if (isRecord(parsed) && Array.isArray(parsed.entries)) {
-      const db = migrateDatabase(parsed).database;
+      const db = migrateDatabase(parsed, { allowDuplicateIds: true }).database;
       incoming = db.entries;
       if (asNumber(parsed.schemaVersion, SCHEMA_VERSION) < SCHEMA_VERSION) {
         migrated = incoming.length;
@@ -156,6 +159,11 @@ export function importJsonText(
   let skippedInvalid = 0;
   const merged = [...existing];
 
+  let importedSettings: Settings | undefined = undefined;
+  if (isRecord(parsed) && "settings" in parsed && isRecord(parsed.settings)) {
+    importedSettings = migrateSettings(parsed.settings);
+  }
+
   for (const entry of incoming) {
     if (!isAllowedPersistUrl(entry.url)) {
       skippedInvalid += 1;
@@ -165,28 +173,22 @@ export function importJsonText(
       skippedDuplicates += 1;
       continue;
     }
-    if (intoEmpty) {
-      merged.push({
-        ...entry,
-        schemaVersion: SCHEMA_VERSION,
-        status: "saved",
-      });
-    } else {
-      merged.push({
-        ...entry,
-        id:
-          entry.id && !merged.some((e) => e.id === entry.id)
-            ? entry.id
-            : createId("t"),
-        schemaVersion: SCHEMA_VERSION,
-        status: "saved",
-      });
-    }
+    const id =
+      entry.id && !merged.some((e) => e.id === entry.id)
+        ? entry.id
+        : createId("t");
+    merged.push({
+      ...entry,
+      id,
+      schemaVersion: SCHEMA_VERSION,
+      status: "saved",
+    });
     added += 1;
   }
 
   return {
     entries: merged,
+    ...(importedSettings ? { settings: importedSettings } : {}),
     summary: {
       added,
       skippedDuplicates,

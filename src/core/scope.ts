@@ -14,6 +14,10 @@ export interface TabLike {
   discarded?: boolean;
 }
 
+export function isValidScope(scope: unknown): scope is SaveScope {
+  return scope === "current" || scope === "others" || scope === "window";
+}
+
 /**
  * Pure selection of which tabs a save scope should target.
  * `activeTabId` is the tab that triggered the action (usually the active one).
@@ -32,7 +36,10 @@ export function selectTabsForScope(
   if (scope === "others") {
     return tabsInWindow.filter((t) => t.id !== activeTabId);
   }
-  return [...tabsInWindow];
+  if (scope === "window") {
+    return [...tabsInWindow];
+  }
+  return [];
 }
 
 export function estimateMemoryFreedMb(

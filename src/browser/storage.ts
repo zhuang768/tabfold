@@ -16,6 +16,7 @@ import { createId } from "../core/id.js";
 const DB_KEY = "tabfold_database";
 const BACKUPS_KEY = "tabfold_backups";
 const CORRUPT_KEY = "tabfold_corrupt_raw";
+const SALVAGE_KEY = "tabfold_salvage";
 
 export interface StorageDriver {
   get(keys: string[]): Promise<Record<string, unknown>>;
@@ -128,42 +129,48 @@ export class CorruptDataError extends Error {
   }
 }
 
+export type LockToken = { readonly id: symbol };
+
 /**
  * Serializes all store mutations inside this service-worker lifetime.
- * Re-entrant: nested run() inside an active section executes immediately
- * (avoids deadlock when exclusive → createBackup / migrate persist).
- * Does not rely on the queue for durability — revision + full verify still apply.
+ * Token-based re-entrancy: nested run() calls passing the active holder token
+ * execute immediately; external calls without the token wait in FIFO order.
  */
 class MutationQueue {
   private tail: Promise<unknown> = Promise.resolve();
-  private active = false;
+  private currentHolder: symbol | null = null;
 
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.active) {
-      return fn();
+  run<T>(fn: (token: LockToken) => Promise<T>, token?: LockToken): Promise<T> {
+    if (token && this.currentHolder === token.id) {
+      return fn(token);
     }
+    const lockId = Symbol("mutation-lock");
+    const myToken: LockToken = { id: lockId };
+
     const run = this.tail.then(
       async () => {
-        this.active = true;
+        this.currentHolder = lockId;
         try {
-          return await fn();
+          return await fn(myToken);
         } finally {
-          this.active = false;
+          this.currentHolder = null;
         }
       },
       async () => {
-        this.active = true;
+        this.currentHolder = lockId;
         try {
-          return await fn();
+          return await fn(myToken);
         } finally {
-          this.active = false;
+          this.currentHolder = null;
         }
       },
     );
+
     this.tail = run.then(
       () => undefined,
       () => undefined,
     );
+
     return run;
   }
 }
@@ -173,7 +180,11 @@ export class LibraryStore {
   private failWrites = false;
   private failReads = false;
 
-  constructor(private readonly driver: StorageDriver) {}
+  private readonly driver: StorageDriver;
+
+  constructor(driver: StorageDriver) {
+    this.driver = driver;
+  }
 
   static failing(driver: StorageDriver): LibraryStore {
     const s = new LibraryStore(driver);
@@ -191,26 +202,29 @@ export class LibraryStore {
   }
 
   /** Run exclusive critical section (save/write/close pipeline uses this). */
-  exclusive<T>(fn: () => Promise<T>): Promise<T> {
-    return this.queue.run(fn);
+  exclusive<T>(
+    fn: (token: LockToken) => Promise<T>,
+    token?: LockToken,
+  ): Promise<T> {
+    return this.queue.run(fn, token);
   }
 
   async readRawDatabase(): Promise<unknown> {
-    const data = await this.driver.get([DB_KEY, CORRUPT_KEY]);
+    const data = await this.driver.get([DB_KEY, CORRUPT_KEY, SALVAGE_KEY]);
     if (data[CORRUPT_KEY] != null && data[DB_KEY] == null) {
       throw new CorruptDataError(
         "Previously detected corruption; raw backup retained.",
         data[CORRUPT_KEY],
       );
     }
-    return data[DB_KEY] ?? null;
+    return data[DB_KEY] ?? data[SALVAGE_KEY] ?? null;
   }
 
   async readDatabase(): Promise<Database> {
     if (this.failReads) {
       throw new Error("Simulated read failure");
     }
-    const data = await this.driver.get([DB_KEY, CORRUPT_KEY]);
+    const data = await this.driver.get([DB_KEY, CORRUPT_KEY, SALVAGE_KEY]);
     if (data[CORRUPT_KEY] != null && data[DB_KEY] == null) {
       throw new CorruptDataError(
         "Previously detected corruption; raw backup retained.",
@@ -225,24 +239,29 @@ export class LibraryStore {
       const result = migrateDatabase(raw);
       if (result.didMigrate) {
         // Persist migration under exclusive lock so ids stay stable
-        await this.queue.run(async () => {
+        await this.exclusive(async () => {
           const again = await this.driver.get([DB_KEY]);
-          if (again[DB_KEY] !== raw && again[DB_KEY] != null) {
-            // Someone else wrote — skip overwrite
-            return;
+          const currentRaw = again[DB_KEY];
+          const currentVer =
+            typeof (currentRaw as Record<string, unknown> | null)
+              ?.schemaVersion === "number"
+              ? ((currentRaw as Record<string, unknown>)
+                  .schemaVersion as number)
+              : 0;
+          if (currentVer < result.database.schemaVersion) {
+            await this.driver.set({ [DB_KEY]: result.database });
           }
-          await this.driver.set({ [DB_KEY]: result.database });
         });
         return result.database;
       }
       return result.database;
     } catch (e) {
       if (e instanceof MigrationError) {
-        await this.driver.set({ [CORRUPT_KEY]: raw });
+        await this.driver.set({ [CORRUPT_KEY]: raw, [SALVAGE_KEY]: raw });
         throw new CorruptDataError(e.message, raw);
       }
       if (e instanceof CorruptDatabaseError) {
-        await this.driver.set({ [CORRUPT_KEY]: raw });
+        await this.driver.set({ [CORRUPT_KEY]: raw, [SALVAGE_KEY]: raw });
         // Keep DB_KEY so raw export still sees both; UI treats as corrupt
         throw new CorruptDataError(e.message, e.raw);
       }
@@ -257,9 +276,11 @@ export class LibraryStore {
   async writeDatabase(
     db: Database,
     expectedRevision: number,
+    token?: LockToken,
   ): Promise<Database> {
-    return this.queue.run(() =>
-      this.writeDatabaseUnlocked(db, expectedRevision),
+    return this.exclusive(
+      () => this.writeDatabaseUnlocked(db, expectedRevision),
+      token,
     );
   }
 
@@ -299,7 +320,7 @@ export class LibraryStore {
     if (this.failReads) {
       throw new Error("Simulated read failure");
     }
-    const data = await this.driver.get([DB_KEY, CORRUPT_KEY]);
+    const data = await this.driver.get([DB_KEY, CORRUPT_KEY, SALVAGE_KEY]);
     if (data[CORRUPT_KEY] != null && data[DB_KEY] == null) {
       throw new CorruptDataError(
         "Previously detected corruption; raw backup retained.",
@@ -311,13 +332,22 @@ export class LibraryStore {
     try {
       const result = migrateDatabase(raw);
       if (result.didMigrate) {
-        await this.driver.set({ [DB_KEY]: result.database });
+        const again = await this.driver.get([DB_KEY]);
+        const currentRaw = again[DB_KEY];
+        const currentVer =
+          typeof (currentRaw as Record<string, unknown> | null)
+            ?.schemaVersion === "number"
+            ? ((currentRaw as Record<string, unknown>).schemaVersion as number)
+            : 0;
+        if (currentVer < result.database.schemaVersion) {
+          await this.driver.set({ [DB_KEY]: result.database });
+        }
         return result.database;
       }
       return result.database;
     } catch (e) {
       if (e instanceof MigrationError || e instanceof CorruptDatabaseError) {
-        await this.driver.set({ [CORRUPT_KEY]: raw });
+        await this.driver.set({ [CORRUPT_KEY]: raw, [SALVAGE_KEY]: raw });
         throw new CorruptDataError(
           e instanceof Error ? e.message : "Corrupt database",
           raw,
@@ -327,13 +357,15 @@ export class LibraryStore {
     }
   }
 
-  async replaceDatabase(db: Database): Promise<Database> {
-    return this.queue.run(async () => {
-      if (this.failWrites) throw new Error("Simulated write failure");
-      await this.driver.set({ [DB_KEY]: db });
-      await this.driver.remove([CORRUPT_KEY]);
-      return this.readDatabaseUnlocked();
-    });
+  async replaceDatabaseUnlocked(db: Database): Promise<Database> {
+    if (this.failWrites) throw new Error("Simulated write failure");
+    await this.driver.set({ [DB_KEY]: db });
+    await this.driver.remove([CORRUPT_KEY]);
+    return this.readDatabaseUnlocked();
+  }
+
+  async replaceDatabase(db: Database, token?: LockToken): Promise<Database> {
+    return this.exclusive(() => this.replaceDatabaseUnlocked(db), token);
   }
 
   async listBackupMeta(): Promise<BackupMeta[]> {
@@ -356,77 +388,104 @@ export class LibraryStore {
       .filter((x): x is BackupMeta => x !== null);
   }
 
-  async createBackup(reason: string, db: Database): Promise<void> {
-    await this.queue.run(async () => {
-      const data = await this.driver.get([BACKUPS_KEY]);
-      const existing = Array.isArray(data[BACKUPS_KEY])
-        ? (data[BACKUPS_KEY] as Snapshot[])
-        : [];
-      const snap: Snapshot = {
-        id: createId("bak"),
-        createdAt: Date.now(),
-        reason,
-        database: structuredClone(db),
-      };
-      const next = [snap, ...existing].slice(0, MAX_BACKUPS);
-      await this.driver.set({ [BACKUPS_KEY]: next });
-    });
+  async createBackupUnlocked(reason: string, db: Database): Promise<void> {
+    const data = await this.driver.get([BACKUPS_KEY]);
+    const existing = Array.isArray(data[BACKUPS_KEY])
+      ? (data[BACKUPS_KEY] as Snapshot[])
+      : [];
+    const snap: Snapshot = {
+      id: createId("bak"),
+      createdAt: Date.now(),
+      reason,
+      database: structuredClone(db),
+    };
+    const next = [snap, ...existing].slice(0, MAX_BACKUPS);
+    await this.driver.set({ [BACKUPS_KEY]: next });
   }
 
-  async restoreBackup(id: string): Promise<Database> {
-    return this.queue.run(async () => {
-      const data = await this.driver.get([BACKUPS_KEY, DB_KEY, CORRUPT_KEY]);
-      const existing = Array.isArray(data[BACKUPS_KEY])
-        ? (data[BACKUPS_KEY] as Snapshot[])
-        : [];
-      const found = existing.find((s) => s.id === id);
-      if (!found) throw new Error("Backup not found");
+  async createBackup(
+    reason: string,
+    db: Database,
+    token?: LockToken,
+  ): Promise<void> {
+    return this.exclusive(() => this.createBackupUnlocked(reason, db), token);
+  }
 
-      // Preserve current raw before restore (even if corrupt)
-      const currentRaw = data[DB_KEY] ?? data[CORRUPT_KEY];
-      if (currentRaw != null) {
-        try {
-          const cur = migrateDatabase(currentRaw).database;
-          const snap: Snapshot = {
-            id: createId("bak"),
-            createdAt: Date.now(),
-            reason: "before-restore-backup",
-            database: structuredClone(cur),
-          };
-          const next = [snap, ...existing].slice(0, MAX_BACKUPS);
-          await this.driver.set({ [BACKUPS_KEY]: next });
-        } catch {
-          await this.driver.set({
-            [CORRUPT_KEY]: currentRaw,
-          });
-        }
-      }
+  async restoreBackupUnlocked(id: string): Promise<Database> {
+    const data = await this.driver.get([
+      BACKUPS_KEY,
+      DB_KEY,
+      CORRUPT_KEY,
+      SALVAGE_KEY,
+    ]);
+    const existing = Array.isArray(data[BACKUPS_KEY])
+      ? (data[BACKUPS_KEY] as Snapshot[])
+      : [];
+    const found = existing.find((s) => s.id === id);
+    if (!found) throw new Error("Backup not found");
 
-      let restored: Database;
+    // Preserve current raw before restore (even if corrupt) in durable salvage
+    const currentRaw = data[DB_KEY] ?? data[CORRUPT_KEY] ?? data[SALVAGE_KEY];
+    if (currentRaw != null) {
+      await this.driver.set({ [SALVAGE_KEY]: currentRaw });
       try {
-        restored = migrateDatabase(found.database).database;
-      } catch (e) {
-        throw new Error(
-          e instanceof Error
-            ? `Backup is not usable: ${e.message}`
-            : "Backup is not usable",
-        );
+        const cur = migrateDatabase(currentRaw).database;
+        const snap: Snapshot = {
+          id: createId("bak"),
+          createdAt: Date.now(),
+          reason: "before-restore-backup",
+          database: structuredClone(cur),
+        };
+        const next = [snap, ...existing].slice(0, MAX_BACKUPS);
+        await this.driver.set({ [BACKUPS_KEY]: next });
+      } catch {
+        await this.driver.set({
+          [SALVAGE_KEY]: currentRaw,
+        });
       }
-      await this.driver.set({ [DB_KEY]: restored });
-      await this.driver.remove([CORRUPT_KEY]);
-      return restored;
-    });
+    }
+
+    let restored: Database;
+    try {
+      restored = migrateDatabase(found.database).database;
+    } catch (e) {
+      throw new Error(
+        e instanceof Error
+          ? `Backup is not usable: ${e.message}`
+          : "Backup is not usable",
+      );
+    }
+    await this.driver.set({ [DB_KEY]: restored });
+    await this.driver.remove([CORRUPT_KEY]);
+
+    const readBack = await this.readDatabaseUnlocked();
+    if (!databaseContentMatches(restored, readBack)) {
+      throw new Error("Restored database content mismatch");
+    }
+
+    return restored;
+  }
+
+  async restoreBackup(id: string, token?: LockToken): Promise<Database> {
+    return this.exclusive(() => this.restoreBackupUnlocked(id), token);
   }
 
   async exportRaw(): Promise<string> {
-    const data = await this.driver.get([DB_KEY, CORRUPT_KEY, BACKUPS_KEY]);
+    const data = await this.driver.get([
+      DB_KEY,
+      CORRUPT_KEY,
+      BACKUPS_KEY,
+      SALVAGE_KEY,
+    ]);
     return `${JSON.stringify(data, null, 2)}\n`;
   }
 
-  async resetAll(): Promise<void> {
-    await this.queue.run(async () => {
-      await this.driver.remove([DB_KEY, BACKUPS_KEY, CORRUPT_KEY]);
-    });
+  async resetAllUnlocked(): Promise<void> {
+    await this.driver.remove([DB_KEY, BACKUPS_KEY, CORRUPT_KEY, SALVAGE_KEY]);
+  }
+
+  async resetAll(token?: LockToken): Promise<void> {
+    return this.exclusive(() => this.resetAllUnlocked(), token);
   }
 
   /** Peek whether corruption marker exists (for UI even when DB unreadable). */

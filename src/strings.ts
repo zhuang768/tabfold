@@ -35,6 +35,13 @@ export const STRINGS = {
   restoreBatch: "Open in batches",
   restoreAllAtOnce: "Open all at once",
   edit: "Edit",
+  ok: "OK",
+  hibernatedSuffix: " (hibernated)",
+  noInactiveTabs: "No inactive background tabs available to hibernate.",
+  backupReasonBeforeRestore: "before-restore-backup",
+  backupReasonBeforeReset: "before-reset",
+  backupReasonBeforeImport: "before-import",
+  backupReasonBeforeClear: "before-clear",
   pickTarget: "Choose a tab to save or hibernate",
   refreshTargets: "Refresh tab list",
 
