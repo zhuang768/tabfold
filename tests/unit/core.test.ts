@@ -49,6 +49,7 @@ import {
   saveTabs,
   undoLastSave,
   restoreEntries,
+  handleRequest,
 } from "../../src/browser/library.js";
 
 function entry(partial: Partial<SavedTab> & { url: string }): SavedTab {
@@ -537,9 +538,18 @@ describe("memory estimate + demo", () => {
     expect(estimateMemoryFreedMb(10)).toBe(500);
     expect(estimateMemoryFreedMb(0)).toBe(0);
   });
-  it("demo data is real local-shaped entries", () => {
+  it("demo data is real local-shaped entries with valid URLs and structure", () => {
     const demo = createDemoEntries(1_700_000_000_000);
     expect(demo.length).toBeGreaterThanOrEqual(3);
+    for (const d of demo) {
+      expect(d.url.startsWith("https://")).toBe(true);
+      expect(new URL(d.url).protocol).toBe("https:");
+      expect(d.title.length).toBeGreaterThan(0);
+      expect(d.status).toBe("saved");
+      expect(d.schemaVersion).toBe(SCHEMA_VERSION);
+      expect(typeof d.savedAt).toBe("number");
+      expect(d.source.windowId).toBe(-1);
+    }
   });
 });
 
@@ -914,5 +924,299 @@ describe("Round 2 formal regressions (R201–R208)", () => {
 
     setStoreForTests(null);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("Round 3 formal data-layer & runtime regressions (R301–R308)", () => {
+  it("R301: runtime empty or invalid scope is rejected without mutation", async () => {
+    const store = new LibraryStore(
+      memoryDriver({ tabfold_database: createEmptyDatabase() }),
+    );
+    setStoreForTests(store);
+    const res = await handleRequest({
+      type: "save",
+      scope: "" as unknown as SaveScope,
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error).toBe("Invalid save scope.");
+    }
+    const db = await store.readDatabase();
+    expect(db.entries).toHaveLength(0);
+    setStoreForTests(null);
+  });
+
+  it("R302: strict schema rejects malformed status, missing title, and invalid types", () => {
+    expect(() =>
+      migrateDatabase(
+        {
+          schemaVersion: 2,
+          entries: [
+            {
+              ...entry({ url: "https://a.test" }),
+              status: "restored" as unknown as "saved",
+            },
+          ],
+          settings: createEmptyDatabase().settings,
+          stats: createEmptyDatabase().stats,
+        },
+        { strictCurrent: true },
+      ),
+    ).toThrow(CorruptDatabaseError);
+
+    expect(() =>
+      migrateDatabase(
+        {
+          schemaVersion: 2,
+          entries: [
+            {
+              ...entry({ url: "https://a.test" }),
+              title: 123 as unknown as string,
+            },
+          ],
+          settings: createEmptyDatabase().settings,
+          stats: createEmptyDatabase().stats,
+        },
+        { strictCurrent: true },
+      ),
+    ).toThrow(CorruptDatabaseError);
+
+    expect(() =>
+      migrateDatabase(
+        {
+          schemaVersion: 2,
+          entries: [
+            {
+              ...entry({ url: "https://a.test" }),
+              favicon: 123 as unknown as string,
+            },
+          ],
+          settings: createEmptyDatabase().settings,
+          stats: createEmptyDatabase().stats,
+        },
+        { strictCurrent: true },
+      ),
+    ).toThrow(CorruptDatabaseError);
+
+    expect(() =>
+      migrateDatabase(
+        {
+          schemaVersion: 2,
+          entries: [
+            {
+              ...entry({ url: "https://a.test" }),
+              source: {
+                windowId: 1,
+                index: "0" as unknown as number,
+                pinned: false,
+              },
+            },
+          ],
+          settings: createEmptyDatabase().settings,
+          stats: createEmptyDatabase().stats,
+        },
+        { strictCurrent: true },
+      ),
+    ).toThrow(CorruptDatabaseError);
+  });
+
+  it("R303: unsaved acknowledgement requires valid confirmToken binding", async () => {
+    const store = new LibraryStore(
+      memoryDriver({ tabfold_database: createEmptyDatabase() }),
+    );
+    setStoreForTests(store);
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        id: "test",
+        getURL: (p: string) => `chrome-extension://test/${p}`,
+      },
+      tabs: {
+        get: vi.fn(async () => ({
+          id: 1,
+          url: "https://form.test",
+          title: "Form",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+        })),
+        query: vi.fn(async () => [
+          {
+            id: 1,
+            url: "https://form.test",
+            title: "Form",
+            windowId: 1,
+            index: 0,
+            pinned: false,
+            active: true,
+          },
+        ]),
+        remove: vi.fn(async () => undefined),
+      },
+      storage: {
+        session: {
+          get: vi.fn(async () => ({})),
+          set: vi.fn(async () => undefined),
+          remove: vi.fn(async () => undefined),
+        },
+      },
+      action: {
+        setBadgeText: vi.fn(async () => undefined),
+        setBadgeBackgroundColor: vi.fn(async () => undefined),
+        setIcon: vi.fn(async () => undefined),
+      },
+    });
+
+    const res = await saveTabs({
+      scope: "current",
+      tabId: 1,
+      confirmedUnsaved: true,
+    });
+    expect(res.saved).toBe(0);
+    expect(res.needsUnsavedAck).toBe(true);
+    expect(res.confirmToken).toBeTruthy();
+
+    setStoreForTests(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("R304: stats write failure reports a visible warning instead of silent success", async () => {
+    const readyDb = {
+      ...createEmptyDatabase(),
+      settings: {
+        ...createEmptyDatabase().settings,
+        onboardingComplete: true,
+        unsavedHintAcknowledged: true,
+      },
+    };
+    const base = memoryDriver({ tabfold_database: readyDb });
+    const driver = {
+      ...base,
+      set: async (items: Record<string, unknown>) => {
+        const candidateDb = items.tabfold_database as
+          { stats?: { totalClosed?: number } } | undefined;
+        if ((candidateDb?.stats?.totalClosed ?? 0) > 0) {
+          throw new Error("Injected close accounting persist failure");
+        }
+        return base.set(items);
+      },
+    };
+
+    const store = new LibraryStore(driver);
+    setStoreForTests(store);
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        id: "test",
+        getURL: (p: string) => `chrome-extension://test/${p}`,
+      },
+      tabs: {
+        get: vi.fn(async () => ({
+          id: 1,
+          url: "https://closed.test",
+          title: "Closed",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+        })),
+        query: vi.fn(async () => [
+          {
+            id: 1,
+            url: "https://closed.test",
+            title: "Closed",
+            windowId: 1,
+            index: 0,
+            pinned: false,
+            active: true,
+          },
+          {
+            id: 2,
+            url: "chrome://settings",
+            title: "Settings",
+            windowId: 1,
+            index: 1,
+            pinned: false,
+            active: false,
+          },
+        ]),
+        remove: vi.fn(async () => undefined),
+        create: vi.fn(async (opts) => ({ id: 100, ...opts })),
+      },
+      storage: {
+        session: {
+          get: vi.fn(async () => ({})),
+          set: vi.fn(async () => undefined),
+          remove: vi.fn(async () => undefined),
+        },
+      },
+      action: {
+        setBadgeText: vi.fn(async () => undefined),
+        setBadgeBackgroundColor: vi.fn(async () => undefined),
+        setIcon: vi.fn(async () => undefined),
+      },
+    });
+
+    const saveRes = await saveTabs({ scope: "current", tabId: 1 });
+    expect(saveRes.saved).toBe(1);
+    expect(saveRes.closed).toBe(1);
+    expect(saveRes.message).toContain("Warning: stats could not be updated");
+
+    setStoreForTests(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("R305: backup restore preserves existing corrupted raw salvage across restores", async () => {
+    const damaged = {
+      schemaVersion: 2,
+      entries: null,
+      uniqueRaw: "must remain salvage",
+    };
+    const backupDb = createEmptyDatabase();
+    const base = memoryDriver({
+      tabfold_database: damaged,
+      tabfold_backups: [
+        { id: "backup", createdAt: 1, reason: "test", database: backupDb },
+      ],
+    });
+    const store = new LibraryStore(base);
+
+    await store.restoreBackup("backup");
+    const first = await store.exportRaw();
+    expect(first).toContain("must remain salvage");
+
+    await store.restoreBackup("backup");
+    const second = await store.exportRaw();
+    expect(second).toContain("must remain salvage");
+  });
+
+  it("R307: runtime allowlist rejects unknown settings keys and out-of-range batch size", async () => {
+    const store = new LibraryStore(
+      memoryDriver({ tabfold_database: createEmptyDatabase() }),
+    );
+    setStoreForTests(store);
+
+    const unknownKeyRes = await handleRequest({
+      type: "patch-settings",
+      patch: { arbitraryKey: "hack" } as unknown as Partial<Settings>,
+    });
+    expect(unknownKeyRes.ok).toBe(false);
+    if (!unknownKeyRes.ok) {
+      expect(unknownKeyRes.error).toContain("Unknown settings key");
+    }
+
+    const badBatchRes = await handleRequest({
+      type: "patch-settings",
+      patch: { restoreBatchSize: 9999 } as unknown as Partial<Settings>,
+    });
+    expect(badBatchRes.ok).toBe(false);
+    if (!badBatchRes.ok) {
+      expect(badBatchRes.error).toContain(
+        "restoreBatchSize must be a number between 1 and 500",
+      );
+    }
+
+    setStoreForTests(null);
   });
 });

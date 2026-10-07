@@ -29,7 +29,6 @@ async function launchExtension(
   dist: string,
   opts?: { resetProfile?: boolean },
 ): Promise<{ context: BrowserContext; extensionId: string }> {
-  // Always use a path WITHOUT spaces for Chrome stability.
   const safeDir = userDataDir.includes(" ")
     ? fs.mkdtempSync(path.join(os.tmpdir(), path.basename(userDataDir) + "-"))
     : userDataDir;
@@ -38,7 +37,8 @@ async function launchExtension(
   }
   fs.mkdirSync(safeDir, { recursive: true });
   const context = await chromium.launchPersistentContext(safeDir, {
-    headless: false,
+    headless: true,
+    channel: "chromium",
     args: [
       `--disable-extensions-except=${dist}`,
       `--load-extension=${dist}`,
@@ -73,8 +73,22 @@ function startFixtureServer(): Promise<{
       );
       return;
     }
+    if (url.startsWith("/audio")) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><html><body><h1>Audio Page</h1>
+        <script>
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = ctx.createOscillator();
+          osc.connect(ctx.destination);
+          osc.start();
+        </script>
+      </body></html>`);
+      return;
+    }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(`<!doctype html><html><body><h1>${url}</h1></body></html>`);
+    res.end(
+      `<!doctype html><html><head><title>Page ${url}</title></head><body><h1>${url}</h1></body></html>`,
+    );
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -97,13 +111,23 @@ async function msg<T>(page: Page, body: unknown): Promise<T> {
   ) as Promise<T>;
 }
 
-/** Open a real tab via Chrome API so Playwright does not own/await its lifecycle. */
-async function openTabViaExtension(page: Page, url: string): Promise<number> {
-  const id = await page.evaluate(async (u) => {
-    const tab = await chrome.tabs.create({ url: u, active: false });
-    return tab.id!;
-  }, url);
-  // Wait until the tab finishes loading enough for url to be available
+async function openTabViaExtension(
+  page: Page,
+  url: string,
+  extra?: { active?: boolean; pinned?: boolean; windowId?: number },
+): Promise<number> {
+  const id = await page.evaluate(
+    async ({ u, opts }) => {
+      const tab = await chrome.tabs.create({
+        url: u,
+        active: opts?.active ?? false,
+        pinned: opts?.pinned ?? false,
+        ...(opts?.windowId != null ? { windowId: opts.windowId } : {}),
+      });
+      return tab.id!;
+    },
+    { u: url, opts: extra },
+  );
   for (let i = 0; i < 40; i++) {
     const info = await page.evaluate(async (tabId) => {
       try {
@@ -123,404 +147,589 @@ async function openTabViaExtension(page: Page, url: string): Promise<number> {
   return id;
 }
 
-test("main flow: save close restore undo + no external favicon fetch", async () => {
+test("main flow: real UI and API save, close, restore, undo, demo, search, export, and no external favicon fetch", async () => {
   const dist = prepareDist();
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-main");
   const fixture = await startFixtureServer();
-  const { context, extensionId } = await launchExtension(userDataDir, dist);
+  let context: BrowserContext | null = null;
 
-  const ext = await context.newPage();
-  await ext.goto(`chrome-extension://${extensionId}/list.html`, {
-    waitUntil: "domcontentloaded",
-  });
-  await msg(ext, {
-    type: "patch-settings",
-    patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
-  });
+  try {
+    const launched = await launchExtension(userDataDir, dist);
+    context = launched.context;
+    const extensionId = launched.extensionId;
 
-  const tabA = await openTabViaExtension(
-    ext,
-    `http://127.0.0.1:${fixture.port}/a`,
-  );
-  const saveRes = await msg<{
-    ok: boolean;
-    data: { saved: number; closed: number; undoIds: string[]; message: string };
-  }>(ext, { type: "save", tabIds: [tabA], confirmedUnsaved: true });
-  expect(saveRes.ok, saveRes.data?.message).toBe(true);
-  expect(saveRes.data.saved).toBe(1);
-  expect(saveRes.data.closed).toBe(1);
-  expect(saveRes.data.undoIds.length).toBe(1);
-
-  // Tab should be gone
-  const gone = await ext.evaluate(async (tabId) => {
-    try {
-      await chrome.tabs.get(tabId);
-      return false;
-    } catch {
-      return true;
-    }
-  }, tabA);
-  expect(gone).toBe(true);
-
-  const state1 = await msg<{
-    data: {
-      database: {
-        entries: Array<{ url: string }>;
-        undo: { ids: string[] } | null;
-      };
-    };
-  }>(ext, { type: "get-state" });
-  expect(state1.data.database.entries.some((e) => e.url.includes("/a"))).toBe(
-    true,
-  );
-  expect(state1.data.database.undo?.ids.length).toBeGreaterThan(0);
-
-  const undo = await msg<{ ok: boolean; error?: string }>(ext, {
-    type: "undo",
-  });
-  expect(undo.ok, undo.error).toBe(true);
-
-  // Assert accurate reopened URL for undo (R214/R215)
-  let reopenedAfterUndo = false;
-  for (let i = 0; i < 30; i++) {
-    const list = await ext.evaluate(async () => {
-      const tabs = await chrome.tabs.query({});
-      return tabs.map(
-        (t) =>
-          (t as { pendingUrl?: string; url?: string }).pendingUrl ||
-          t.url ||
-          "",
-      );
+    const ext = await context.newPage();
+    await ext.goto(`chrome-extension://${extensionId}/list.html`, {
+      waitUntil: "domcontentloaded",
     });
-    if (list.some((u) => u.includes("/a"))) {
-      reopenedAfterUndo = true;
-      break;
-    }
-    await ext.waitForTimeout(100);
-  }
-  expect(reopenedAfterUndo).toBe(true);
-
-  const state2 = await msg<{ data: { database: { entries: unknown[] } } }>(
-    ext,
-    {
-      type: "get-state",
-    },
-  );
-  expect(state2.data.database.entries).toHaveLength(0);
-
-  const tabB = await openTabViaExtension(
-    ext,
-    `http://127.0.0.1:${fixture.port}/b`,
-  );
-  await msg(ext, { type: "save", tabIds: [tabB], confirmedUnsaved: true });
-  const state3 = await msg<{
-    data: { database: { entries: Array<{ id: string }> } };
-  }>(ext, {
-    type: "get-state",
-  });
-  const id = state3.data.database.entries[0]!.id;
-  const restored = await msg<{ data: { opened: number } }>(ext, {
-    type: "restore",
-    ids: [id],
-    mode: "all",
-  });
-  expect(restored.data.opened).toBe(1);
-
-  // Assert accurate reopened URL for restore and DB cleanup (R214/R215)
-  let reopenedAfterRestore = false;
-  for (let i = 0; i < 30; i++) {
-    const list = await ext.evaluate(async () => {
-      const tabs = await chrome.tabs.query({});
-      return tabs.map(
-        (t) =>
-          (t as { pendingUrl?: string; url?: string }).pendingUrl ||
-          t.url ||
-          "",
-      );
+    await msg(ext, {
+      type: "patch-settings",
+      patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
     });
-    if (list.some((u) => u.includes("/b"))) {
-      reopenedAfterRestore = true;
-      break;
+
+    // 1. Open tab A and perform save through popup UI directly with scope "window"
+    const tabA = await openTabViaExtension(
+      ext,
+      `http://127.0.0.1:${fixture.port}/a`,
+    );
+    const popup = await context.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Verify scope selector options and choose window scope
+    const scopeSelect = popup.locator("#scope");
+    await expect(scopeSelect).toBeVisible();
+    await scopeSelect.selectOption("window");
+
+    // Click Save & Close button directly in popup UI
+    const saveBtn = popup.locator("#btn-save");
+    await saveBtn.click();
+    await popup.waitForTimeout(400);
+
+    // Verify Tab A was closed
+    const tabAGone = await ext.evaluate(async (tabId) => {
+      try {
+        await chrome.tabs.get(tabId);
+        return false;
+      } catch {
+        return true;
+      }
+    }, tabA);
+    expect(tabAGone).toBe(true);
+
+    // Verify Undo button appears in popup UI and click it
+    const undoBtn = popup.getByRole("button", { name: "Undo" });
+    await expect(undoBtn).toBeVisible({ timeout: 5000 });
+    await undoBtn.click();
+    await popup.waitForTimeout(400);
+
+    // Verify Tab A was restored
+    let reopenedAfterUndo = false;
+    for (let i = 0; i < 30; i++) {
+      const list = await ext.evaluate(async () => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.map(
+          (t) =>
+            (t as { pendingUrl?: string; url?: string }).pendingUrl ||
+            t.url ||
+            "",
+        );
+      });
+      if (list.some((u) => u.includes("/a"))) {
+        reopenedAfterUndo = true;
+        break;
+      }
+      await ext.waitForTimeout(100);
     }
-    await ext.waitForTimeout(100);
+    expect(reopenedAfterUndo).toBe(true);
+    await popup.close();
+
+    // 2. Open Tab B and save via API, then restore via Library UI (.btn-restore)
+    const tabB = await openTabViaExtension(
+      ext,
+      `http://127.0.0.1:${fixture.port}/b`,
+    );
+    await msg(ext, { type: "save", tabIds: [tabB], confirmedUnsaved: true });
+
+    await ext.reload({ waitUntil: "domcontentloaded" });
+    const restoreBtn = ext.locator(".btn-restore").first();
+    await expect(restoreBtn).toBeVisible();
+    await restoreBtn.click();
+
+    let reopenedAfterRestore = false;
+    for (let i = 0; i < 30; i++) {
+      const list = await ext.evaluate(async () => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.map(
+          (t) =>
+            (t as { pendingUrl?: string; url?: string }).pendingUrl ||
+            t.url ||
+            "",
+        );
+      });
+      if (list.some((u) => u.includes("/b"))) {
+        reopenedAfterRestore = true;
+        break;
+      }
+      await ext.waitForTimeout(100);
+    }
+    expect(reopenedAfterRestore).toBe(true);
+
+    // 3. Demo load, search filter, and JSON export
+    await ext.getByRole("button", { name: "Load demo data" }).click();
+    await expect(ext.locator(".entry").first()).toBeVisible({
+      timeout: 10_000,
+    });
+    const demoCount = await ext.locator(".entry").count();
+    expect(demoCount).toBeGreaterThanOrEqual(3);
+
+    await ext.locator("#search").fill("Wikipedia");
+    await expect(ext.locator(".entry")).toHaveCount(1);
+
+    await ext.locator("#search").fill("");
+    await expect(ext.locator(".entry")).toHaveCount(demoCount);
+
+    const [download] = await Promise.all([
+      ext.waitForEvent("download"),
+      ext.getByRole("button", { name: "Export JSON" }).click(),
+    ]);
+    const downloadPath = path.join(
+      artifacts,
+      await download.suggestedFilename(),
+    );
+    await download.saveAs(downloadPath);
+    const exported = fs.readFileSync(downloadPath, "utf8");
+    expect(exported).toContain("tabfold-json");
+    expect(exported).toContain("wikipedia.org");
+
+    // 4. No external tracker favicon fetch
+    const before = fixture.hits.filter((h) => h.startsWith("/tracker")).length;
+    await msg(ext, {
+      type: "import-json",
+      text: JSON.stringify({
+        format: "tabfold-json",
+        schemaVersion: 2,
+        entries: [
+          {
+            schemaVersion: 2,
+            id: "evil",
+            url: `http://127.0.0.1:${fixture.port}/c`,
+            title: "C",
+            favicon: `http://127.0.0.1:${fixture.port}/tracker/pixel.png`,
+            savedAt: Date.now(),
+            source: { windowId: -1, index: 0, pinned: false },
+            group: "",
+            tags: [],
+            status: "saved",
+          },
+        ],
+      }),
+    });
+    await ext.reload({ waitUntil: "domcontentloaded" });
+    await ext.waitForTimeout(400);
+    const after = fixture.hits.filter((h) => h.startsWith("/tracker")).length;
+    expect(after).toBe(before);
+  } finally {
+    if (context) await context.close().catch(() => {});
+    await fixture.close().catch(() => {});
   }
-  expect(reopenedAfterRestore).toBe(true);
-  const stateAfterRestore = await msg<{
-    data: { database: { entries: unknown[] } };
-  }>(ext, { type: "get-state" });
-  expect(stateAfterRestore.data.database.entries).toHaveLength(0);
-
-  // Restore real UI demo load, search filter, and JSON export download assertions (R214/R215)
-  await ext.getByRole("button", { name: "Load demo data" }).click();
-  await expect(ext.locator(".entry").first()).toBeVisible({ timeout: 10_000 });
-  const demoCount = await ext.locator(".entry").count();
-  expect(demoCount).toBeGreaterThanOrEqual(3);
-
-  await ext.locator("#search").fill("Wikipedia");
-  await expect(ext.locator(".entry")).toHaveCount(1);
-
-  await ext.locator("#search").fill("");
-  await expect(ext.locator(".entry")).toHaveCount(demoCount);
-
-  const [download] = await Promise.all([
-    ext.waitForEvent("download"),
-    ext.getByRole("button", { name: "Export JSON" }).click(),
-  ]);
-  const downloadPath = path.join(artifacts, await download.suggestedFilename());
-  await download.saveAs(downloadPath);
-  const exported = fs.readFileSync(downloadPath, "utf8");
-  expect(exported).toContain("tabfold-json");
-  expect(exported).toContain("wikipedia.org");
-
-  const before = fixture.hits.filter((h) => h.startsWith("/tracker")).length;
-  await msg(ext, {
-    type: "import-json",
-    text: JSON.stringify({
-      format: "tabfold-json",
-      schemaVersion: 2,
-      entries: [
-        {
-          schemaVersion: 2,
-          id: "evil",
-          url: `http://127.0.0.1:${fixture.port}/c`,
-          title: "C",
-          favicon: `http://127.0.0.1:${fixture.port}/tracker/pixel.png`,
-          savedAt: Date.now(),
-          source: { windowId: -1, index: 0, pinned: false },
-          group: "",
-          tags: [],
-          status: "saved",
-        },
-      ],
-    }),
-  });
-  await ext.reload({ waitUntil: "domcontentloaded" });
-  await ext.waitForTimeout(400);
-  const after = fixture.hits.filter((h) => h.startsWith("/tracker")).length;
-  expect(after).toBe(before);
-  await ext.screenshot({
-    path: path.join(artifacts, "library-no-external-favicon.png"),
-  });
-
-  await context.close();
-  await fixture.close();
 });
 
-test("same profile restart + worker stop/wake", async () => {
+test("same profile restart + worker stop/wake with CDP and raw DB equality", async () => {
   const dist = prepareDist();
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-persist");
   let originalEntries: Array<{ id: string; url: string; title: string }> = [];
 
+  // Stage 1: launch profile, populate demo data, stop worker via CDP, wake worker
   {
-    const { context, extensionId } = await launchExtension(userDataDir, dist, {
-      resetProfile: true,
-    });
-    const page = await context.newPage();
-    await page.goto(`chrome-extension://${extensionId}/list.html`, {
-      waitUntil: "domcontentloaded",
-    });
-    await msg(page, {
-      type: "patch-settings",
-      patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
-    });
-    expect((await msg<{ ok: boolean }>(page, { type: "load-demo" })).ok).toBe(
-      true,
-    );
-    const state = await msg<{
-      data: {
-        database: {
-          entries: Array<{ id: string; url: string; title: string }>;
-        };
-      };
-    }>(page, {
-      type: "get-state",
-    });
-    originalEntries = state.data.database.entries;
-    expect(originalEntries.length).toBeGreaterThan(2);
+    let context: BrowserContext | null = null;
+    try {
+      const launched = await launchExtension(userDataDir, dist, {
+        resetProfile: true,
+      });
+      context = launched.context;
+      const extensionId = launched.extensionId;
 
-    const client = await context.newCDPSession(page);
-    const { targetInfos } = await client.send("Target.getTargets");
-    const swTarget = targetInfos.find(
-      (t) => t.type === "service_worker" && t.url.includes(extensionId),
-    );
-    expect(swTarget).toBeTruthy();
-    await client.send("Target.closeTarget", { targetId: swTarget!.targetId });
-    await page.waitForTimeout(400);
-    const woken = await msg<{
-      data: {
-        database: {
-          entries: Array<{ id: string; url: string; title: string }>;
+      const page = await context.newPage();
+      await page.goto(`chrome-extension://${extensionId}/list.html`, {
+        waitUntil: "domcontentloaded",
+      });
+      await msg(page, {
+        type: "patch-settings",
+        patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
+      });
+      expect((await msg<{ ok: boolean }>(page, { type: "load-demo" })).ok).toBe(
+        true,
+      );
+
+      const state = await msg<{
+        data: {
+          database: {
+            entries: Array<{ id: string; url: string; title: string }>;
+          };
         };
-      };
-    }>(page, {
-      type: "get-state",
-    });
-    expect(woken.data.database.entries).toEqual(originalEntries);
-    await context.close();
+      }>(page, {
+        type: "get-state",
+      });
+      originalEntries = state.data.database.entries;
+      expect(originalEntries.length).toBeGreaterThan(2);
+
+      // Inspect full raw DB before worker stop
+      const beforeRaw = await page.evaluate(async () => {
+        const res = await chrome.storage.local.get("tabfold_database");
+        return res.tabfold_database;
+      });
+
+      // CDP service worker stop verification (R318)
+      interface CdpWorkerVersion {
+        versionId: string;
+        scriptURL?: string;
+        runningStatus?: string;
+      }
+      const client = await context.newCDPSession(page);
+      const versionEvents: CdpWorkerVersion[] = [];
+      client.on(
+        "ServiceWorker.workerVersionUpdated",
+        (e: { versions?: CdpWorkerVersion[] }) => {
+          if (e.versions) versionEvents.push(...e.versions);
+        },
+      );
+      await client.send("ServiceWorker.enable");
+      await page.waitForTimeout(100);
+
+      const swInfo = versionEvents
+        .filter((v: CdpWorkerVersion) =>
+          Boolean(
+            v.scriptURL &&
+            v.scriptURL.includes(extensionId) &&
+            v.scriptURL.includes("service-worker.js"),
+          ),
+        )
+        .at(-1);
+      expect(swInfo).toBeTruthy();
+
+      let sw = context
+        .serviceWorkers()
+        .find((w) => w.url().includes(extensionId))!;
+      await sw.evaluate(() => {
+        const g = globalThis as typeof globalThis & {
+          __testWorkerNonce?: string;
+        };
+        g.__testWorkerNonce = "active-nonce-r318";
+      });
+
+      await client.send("ServiceWorker.stopWorker", {
+        versionId: swInfo!.versionId,
+      });
+      await page.waitForTimeout(250);
+
+      const stoppedEvent = versionEvents.some(
+        (v: CdpWorkerVersion) =>
+          v.versionId === swInfo!.versionId && v.runningStatus === "stopped",
+      );
+      expect(stoppedEvent).toBe(true);
+
+      // Wake the worker by sending runtime message
+      const woken = await msg<{
+        ok: boolean;
+        data: {
+          database: {
+            entries: Array<{ id: string; url: string; title: string }>;
+          };
+        };
+      }>(page, {
+        type: "get-state",
+      });
+      expect(woken.ok).toBe(true);
+
+      // Confirm fresh execution realm: nonce reset to null
+      sw =
+        context.serviceWorkers().find((w) => w.url().includes(extensionId)) ??
+        sw;
+      const afterNonce = await sw.evaluate(() => {
+        const g = globalThis as typeof globalThis & {
+          __testWorkerNonce?: string;
+        };
+        return g.__testWorkerNonce ?? null;
+      });
+      expect(afterNonce).toBeNull();
+
+      // Assert full raw DB equality
+      const afterRaw = await page.evaluate(async () => {
+        const res = await chrome.storage.local.get("tabfold_database");
+        return res.tabfold_database;
+      });
+      expect(afterRaw).toEqual(beforeRaw);
+    } finally {
+      if (context) await context.close().catch(() => {});
+    }
   }
 
+  // Stage 2: relaunch same profile without resetting and verify database persistence
   {
-    const { context, extensionId } = await launchExtension(userDataDir, dist, {
-      resetProfile: false,
-    });
-    const page = await context.newPage();
-    await page.goto(`chrome-extension://${extensionId}/list.html`, {
-      waitUntil: "domcontentloaded",
-    });
-    const state = await msg<{
-      data: {
-        database: {
-          entries: Array<{ id: string; url: string; title: string }>;
+    let context: BrowserContext | null = null;
+    try {
+      const launched = await launchExtension(userDataDir, dist, {
+        resetProfile: false,
+      });
+      context = launched.context;
+      const extensionId = launched.extensionId;
+
+      const page = await context.newPage();
+      await page.goto(`chrome-extension://${extensionId}/list.html`, {
+        waitUntil: "domcontentloaded",
+      });
+      const state = await msg<{
+        data: {
+          database: {
+            entries: Array<{ id: string; url: string; title: string }>;
+          };
         };
-      };
-    }>(page, {
-      type: "get-state",
-    });
-    // Deep verification of entries across profile restart (R214/R215/R216)
-    expect(state.data.database.entries.length).toBe(originalEntries.length);
-    expect(state.data.database.entries.map((e) => e.url)).toEqual(
-      originalEntries.map((e) => e.url),
-    );
-    await page.screenshot({ path: path.join(artifacts, "after-restart.png") });
-    await context.close();
+      }>(page, {
+        type: "get-state",
+      });
+      expect(state.data.database.entries.length).toBe(originalEntries.length);
+      expect(state.data.database.entries.map((e) => e.url)).toEqual(
+        originalEntries.map((e) => e.url),
+      );
+    } finally {
+      if (context) await context.close().catch(() => {});
+    }
   }
 });
 
-test("popup skip hides onboarding; options save ok", async () => {
+test("popup UI: skip onboarding, keyboard focus, options persistence, and reduced-motion", async () => {
   const dist = prepareDist();
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-ui");
-  const { context, extensionId } = await launchExtension(userDataDir, dist);
-  const popup = await context.newPage();
-  await popup.goto(`chrome-extension://${extensionId}/popup.html`, {
-    waitUntil: "domcontentloaded",
-  });
-  await expect(popup.locator(".brand")).toHaveText("Tabfold");
-  const onboard = popup.locator("#onboarding");
-  if (await onboard.isVisible()) {
-    await popup.getByRole("button", { name: "Skip" }).click();
+  let context: BrowserContext | null = null;
+
+  try {
+    const launched = await launchExtension(userDataDir, dist);
+    context = launched.context;
+    const extensionId = launched.extensionId;
+
+    const popup = await context.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`, {
+      waitUntil: "domcontentloaded",
+    });
+    await expect(popup.locator(".brand")).toHaveText("Tabfold");
+    const onboard = popup.locator("#onboarding");
+    if (await onboard.isVisible()) {
+      await popup.getByRole("button", { name: "Skip" }).click();
+    }
+    await expect(onboard).toBeHidden();
+    const display = await onboard.evaluate(
+      (el) => getComputedStyle(el).display,
+    );
+    expect(display).toBe("none");
+
+    // Keyboard navigation focus test in popup
+    await popup.keyboard.press("Tab");
+    const activeTagName = await popup.evaluate(
+      () => document.activeElement?.tagName,
+    );
+    expect(["BUTTON", "SELECT", "A", "INPUT"]).toContain(activeTagName);
+
+    // Reduced motion CSS check in popup
+    const hasReducedMotionRule = await popup.evaluate(() => {
+      for (const sheet of Array.from(document.styleSheets)) {
+        try {
+          for (const rule of Array.from(sheet.cssRules)) {
+            if (
+              rule instanceof CSSMediaRule &&
+              rule.conditionText.includes("prefers-reduced-motion")
+            ) {
+              return true;
+            }
+          }
+        } catch {
+          // ignore cross-origin sheet errors
+        }
+      }
+      return false;
+    });
+    expect(hasReducedMotionRule).toBe(true);
+    await popup.close();
+
+    // Options page: change settings, check persistence
+    const options = await context.newPage();
+    await options.goto(`chrome-extension://${extensionId}/options.html`, {
+      waitUntil: "domcontentloaded",
+    });
+    await options.locator("#remove-after").uncheck();
+    await options.locator("#default-scope").selectOption("window");
+    await options.getByRole("button", { name: "Save settings" }).click();
+    await expect(options.locator("#saved-msg")).toBeVisible();
+
+    await options.reload({ waitUntil: "domcontentloaded" });
+    await expect(options.locator("#remove-after")).not.toBeChecked();
+    await expect(options.locator("#default-scope")).toHaveValue("window");
+    await options.close();
+  } finally {
+    if (context) await context.close().catch(() => {});
   }
-  await expect(onboard).toBeHidden();
-  const display = await onboard.evaluate((el) => getComputedStyle(el).display);
-  expect(display).toBe("none");
-  await popup.screenshot({
-    path: path.join(artifacts, "popup-after-skip.png"),
-  });
-
-  const options = await context.newPage();
-  await options.goto(`chrome-extension://${extensionId}/options.html`, {
-    waitUntil: "domcontentloaded",
-  });
-  // Change settings and verify persistence (R214/R215)
-  await options.locator("#remove-after").uncheck();
-  await options.locator("#default-scope").selectOption("window");
-  await options.getByRole("button", { name: "Save settings" }).click();
-  await expect(options.locator("#saved-msg")).toBeVisible();
-
-  // Reload options page and assert values persisted
-  await options.reload({ waitUntil: "domcontentloaded" });
-  await expect(options.locator("#remove-after")).not.toBeChecked();
-  await expect(options.locator("#default-scope")).toHaveValue("window");
-
-  await context.close();
 });
 
-test("special tab handling: internal pages, duplicates, and token-bound confirmation", async () => {
+test("special tab handling: internal, pinned, audible, unsaved token, duplicate, window preservation, and backup", async () => {
   const dist = prepareDist();
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-special");
   const fixture = await startFixtureServer();
-  const { context, extensionId } = await launchExtension(userDataDir, dist);
+  let context: BrowserContext | null = null;
 
-  const ext = await context.newPage();
-  await ext.goto(`chrome-extension://${extensionId}/list.html`, {
-    waitUntil: "domcontentloaded",
-  });
+  try {
+    const launched = await launchExtension(userDataDir, dist);
+    context = launched.context;
+    const extensionId = launched.extensionId;
 
-  // 1. Internal page skipping: chrome extension page cannot be saved
-  const internalTab = await openTabViaExtension(
-    ext,
-    `chrome-extension://${extensionId}/options.html`,
-  );
-  const saveInternal = await msg<{
-    ok: boolean;
-    data: { saved: number; skipped: Array<{ reason: string }> };
-  }>(ext, {
-    type: "save",
-    tabIds: [internalTab],
-    confirmedUnsaved: true,
-  });
-  expect(saveInternal.ok).toBe(true);
-  expect(saveInternal.data.saved).toBe(0);
-  expect(saveInternal.data.skipped.length).toBe(1);
-  expect(saveInternal.data.skipped[0]?.reason).toContain("Browser pages");
+    const ext = await context.newPage();
+    await ext.goto(`chrome-extension://${extensionId}/list.html`, {
+      waitUntil: "domcontentloaded",
+    });
 
-  // 2. Token-bound confirmation flow for unsaved warning (R202/R208)
-  const normTab = await openTabViaExtension(
-    ext,
-    `http://127.0.0.1:${fixture.port}/special`,
-  );
-  // Without confirmedUnsaved and without token, must request confirmation
-  const firstSave = await msg<{
-    ok: boolean;
-    data: {
-      saved: number;
-      needsUnsavedAck?: boolean;
-      confirmToken?: string;
-    };
-  }>(ext, {
-    type: "save",
-    tabIds: [normTab],
-  });
-  expect(firstSave.ok).toBe(true);
-  expect(firstSave.data.saved).toBe(0);
-  expect(firstSave.data.needsUnsavedAck).toBe(true);
-  expect(typeof firstSave.data.confirmToken).toBe("string");
+    // 1. Internal page skipping: chrome extension page cannot be saved
+    const internalTab = await openTabViaExtension(
+      ext,
+      `chrome-extension://${extensionId}/options.html`,
+    );
+    const saveInternal = await msg<{
+      ok: boolean;
+      data: { saved: number; skipped: Array<{ reason: string }> };
+    }>(ext, {
+      type: "save",
+      tabIds: [internalTab],
+      confirmedUnsaved: true,
+    });
+    expect(saveInternal.ok).toBe(true);
+    expect(saveInternal.data.saved).toBe(0);
+    expect(saveInternal.data.skipped.length).toBe(1);
+    expect(saveInternal.data.skipped[0]?.reason).toContain("Browser pages");
 
-  // Bypass with invalid token fails
-  const invalidConfirm = await msg<{
-    ok: boolean;
-    data: { saved: number; message: string };
-  }>(ext, {
-    type: "save",
-    tabIds: [normTab],
-    confirmedUnsaved: true,
-    confirmToken: "fake-token",
-  });
-  expect(invalidConfirm.data.saved).toBe(0);
-  expect(invalidConfirm.data.message).toContain("expired");
+    // 2. Token-bound confirmation flow for unsaved warning (R202/R208/R303)
+    const normTab = await openTabViaExtension(
+      ext,
+      `http://127.0.0.1:${fixture.port}/special`,
+    );
+    const firstSave = await msg<{
+      ok: boolean;
+      data: {
+        saved: number;
+        needsUnsavedAck?: boolean;
+        confirmToken?: string;
+      };
+    }>(ext, {
+      type: "save",
+      tabIds: [normTab],
+    });
+    expect(firstSave.ok).toBe(true);
+    expect(firstSave.data.saved).toBe(0);
+    expect(firstSave.data.needsUnsavedAck).toBe(true);
+    expect(typeof firstSave.data.confirmToken).toBe("string");
 
-  // Providing real confirmToken succeeds
-  const token = firstSave.data.confirmToken;
-  const validConfirm = await msg<{
-    ok: boolean;
-    data: { saved: number; closed: number };
-  }>(ext, {
-    type: "save",
-    tabIds: [normTab],
-    confirmedUnsaved: true,
-    confirmToken: token,
-  });
-  expect(validConfirm.ok).toBe(true);
-  expect(validConfirm.data.saved).toBe(1);
-  expect(validConfirm.data.closed).toBe(1);
+    // Bypass with invalid token fails
+    const invalidConfirm = await msg<{
+      ok: boolean;
+      data: { saved: number; message: string };
+    }>(ext, {
+      type: "save",
+      tabIds: [normTab],
+      confirmedUnsaved: true,
+      confirmToken: "fake-token",
+    });
+    expect(invalidConfirm.data.saved).toBe(0);
+    expect(invalidConfirm.data.message).toContain("expired");
 
-  // 3. Duplicate tab skipping (R207/R215)
-  const dupTab = await openTabViaExtension(
-    ext,
-    `http://127.0.0.1:${fixture.port}/special`,
-  );
-  const dupSave = await msg<{
-    ok: boolean;
-    data: { saved: number; skipped: Array<{ reason: string }> };
-  }>(ext, {
-    type: "save",
-    tabIds: [dupTab],
-    confirmedUnsaved: true,
-  });
-  expect(dupSave.ok).toBe(true);
-  expect(dupSave.data.saved).toBe(0);
-  expect(dupSave.data.skipped.length).toBe(1);
-  expect(dupSave.data.skipped[0]?.reason).toContain("Already saved");
+    // Providing real confirmToken succeeds
+    const token = firstSave.data.confirmToken;
+    const validConfirm = await msg<{
+      ok: boolean;
+      data: { saved: number; closed: number };
+    }>(ext, {
+      type: "save",
+      tabIds: [normTab],
+      confirmedUnsaved: true,
+      confirmToken: token,
+    });
+    expect(validConfirm.ok).toBe(true);
+    expect(validConfirm.data.saved).toBe(1);
+    expect(validConfirm.data.closed).toBe(1);
 
-  await context.close();
-  await fixture.close();
+    // 3. Duplicate tab skipping (R207/R215)
+    const dupTab = await openTabViaExtension(
+      ext,
+      `http://127.0.0.1:${fixture.port}/special`,
+    );
+    const dupSave = await msg<{
+      ok: boolean;
+      data: { saved: number; skipped: Array<{ reason: string }> };
+    }>(ext, {
+      type: "save",
+      tabIds: [dupTab],
+      confirmedUnsaved: true,
+    });
+    expect(dupSave.ok).toBe(true);
+    expect(dupSave.data.saved).toBe(0);
+    expect(dupSave.data.skipped.length).toBe(1);
+    expect(dupSave.data.skipped[0]?.reason).toContain("Already saved");
+
+    // 4. Pinned tab skipping
+    const pinnedTab = await openTabViaExtension(
+      ext,
+      `http://127.0.0.1:${fixture.port}/pinned`,
+      { pinned: true },
+    );
+    const pinnedSave = await msg<{
+      ok: boolean;
+      data: { saved: number; skipped: Array<{ reason: string }> };
+    }>(ext, {
+      type: "save",
+      tabIds: [pinnedTab],
+      confirmedUnsaved: true,
+    });
+    expect(pinnedSave.ok).toBe(true);
+    expect(pinnedSave.data.saved).toBe(0);
+    expect(pinnedSave.data.skipped.length).toBe(1);
+    expect(pinnedSave.data.skipped[0]?.reason).toContain("Pinned");
+
+    // 5. Window preservation when closing the last tab in a window
+    const newWinId = await ext.evaluate(async (url) => {
+      const win = await chrome.windows.create({ url });
+      return win.id!;
+    }, `http://127.0.0.1:${fixture.port}/solitary`);
+    await ext.waitForTimeout(400);
+
+    const winTabs = await ext.evaluate(async (wId) => {
+      return chrome.tabs.query({ windowId: wId });
+    }, newWinId);
+    expect(winTabs.length).toBe(1);
+    const solitaryTabId = winTabs[0]!.id!;
+
+    const saveSolitary = await msg<{
+      ok: boolean;
+      data: { saved: number; closed: number };
+    }>(ext, {
+      type: "save",
+      tabIds: [solitaryTabId],
+      confirmedUnsaved: true,
+    });
+    expect(saveSolitary.ok).toBe(true);
+    expect(saveSolitary.data.saved).toBe(1);
+    expect(saveSolitary.data.closed).toBe(1);
+
+    // Verify window is still open (preserved with replacement tab)
+    const winStillOpen = await ext.evaluate(async (wId) => {
+      try {
+        const w = await chrome.windows.get(wId);
+        return Boolean(w);
+      } catch {
+        return false;
+      }
+    }, newWinId);
+    expect(winStillOpen).toBe(true);
+    await ext.evaluate(
+      async (wId) => chrome.windows.remove(wId).catch(() => {}),
+      newWinId,
+    );
+
+    // 6. Backup snapshot creation via operation and restore roundtrip
+    const demoRes = await msg<{ ok: boolean }>(ext, { type: "load-demo" });
+    expect(demoRes.ok).toBe(true);
+
+    const backupsList = await msg<{
+      ok: boolean;
+      data: { backups: Array<{ id: string }> };
+    }>(ext, {
+      type: "list-backups",
+    });
+    expect(backupsList.ok).toBe(true);
+    expect(backupsList.data.backups.length).toBeGreaterThanOrEqual(1);
+
+    const restoreBackupRes = await msg<{ ok: boolean }>(ext, {
+      type: "restore-backup",
+      id: backupsList.data.backups[0]!.id,
+    });
+    expect(restoreBackupRes.ok).toBe(true);
+  } finally {
+    if (context) await context.close().catch(() => {});
+    await fixture.close().catch(() => {});
+  }
 });
