@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   selectTabsForScope,
   estimateMemoryFreedMb,
+  isValidScope,
 } from "../../src/core/scope.js";
 import {
   findDuplicate,
@@ -21,12 +22,16 @@ import {
   importJsonText,
   importPlainTextList,
 } from "../../src/core/import-export.js";
-import { verifyEntriesPresent } from "../../src/core/verify.js";
+import {
+  verifyEntriesPresent,
+  databaseContentMatches,
+} from "../../src/core/verify.js";
 import {
   createEmptyDatabase,
   SCHEMA_VERSION,
   UNDO_TTL_MS,
   type SavedTab,
+  type SaveScope,
 } from "../../src/types.js";
 import {
   LibraryStore,
@@ -43,6 +48,7 @@ import {
   setStoreForTests,
   saveTabs,
   undoLastSave,
+  restoreEntries,
 } from "../../src/browser/library.js";
 
 function entry(partial: Partial<SavedTab> & { url: string }): SavedTab {
@@ -96,7 +102,7 @@ describe("url / dedupe / whitelist / search", () => {
     ).toBe(false);
     expect(
       urlsEqual("https://example.com/path/", "https://example.com/path"),
-    ).toBe(true);
+    ).toBe(false);
     const entries = [entry({ url: "https://app.test/#/note/1" })];
     expect(findDuplicate(entries, "https://app.test/#/note/2")).toBeUndefined();
   });
@@ -209,6 +215,9 @@ describe("import / export", () => {
       }),
     ];
     const text = exportJsonString(db);
+    const once = importJsonText(text, db.entries);
+    expect(once.summary.skippedDuplicates).toBe(1);
+    expect(once.summary.added).toBe(0);
     const intoEmpty = importJsonText(text, []);
     expect(intoEmpty.summary.added).toBe(1);
     expect(intoEmpty.entries[0]?.id).toBe("keep-me");
@@ -258,12 +267,14 @@ describe("import / export", () => {
     const result = importPlainTextList(text, []);
     expect(result.summary.added).toBe(2);
     expect(result.summary.skippedInvalid).toBe(1);
+    expect(result.entries[0]?.title).toBe("Alpha Site");
   });
 
   it("rejects invalid json without changing entries", () => {
     const existing = [entry({ url: "https://keep.test" })];
     const result = importJsonText("{nope", existing);
     expect(result.entries).toEqual(existing);
+    expect(result.summary.added).toBe(0);
   });
 });
 
@@ -448,9 +459,9 @@ describe("mutation queue reentrancy (C01 nested backup)", () => {
   it("exclusive + createBackup does not deadlock", async () => {
     const store = new LibraryStore(memoryDriver());
     const empty = await store.readDatabase();
-    const written = await store.exclusive(async () => {
+    const written = await store.exclusive(async (token) => {
       const db = await store.readDatabaseUnlocked();
-      await store.createBackup("before-import", db);
+      await store.createBackup("before-import", db, token);
       return store.writeDatabaseUnlocked(
         {
           ...db,
@@ -544,5 +555,364 @@ describe("controllable driver exists for interleaving", () => {
     gate.resumeSet();
     await p;
     expect(done).toBe(true);
+  });
+});
+
+describe("Round 2 formal regressions (R201–R208)", () => {
+  it("R201: serializes delayed external calls so no closed tab is lost", async () => {
+    let paused = false;
+    let resolveRelease: () => void = () => undefined;
+    const releasePromise = new Promise<void>((r) => {
+      resolveRelease = r;
+    });
+    let resolveEntered: () => void = () => undefined;
+    const enteredPromise = new Promise<void>((r) => {
+      resolveEntered = r;
+    });
+
+    const base = memoryDriver({
+      tabfold_database: {
+        ...createEmptyDatabase(),
+        settings: {
+          ...createEmptyDatabase().settings,
+          onboardingComplete: true,
+          unsavedHintAcknowledged: true,
+        },
+      },
+    });
+
+    const driver = {
+      ...base,
+      set: async (items: Record<string, unknown>) => {
+        const db = items.tabfold_database as {
+          entries?: Array<{ url: string }>;
+        };
+        if (!paused && db?.entries?.[0]?.url === "https://a.test") {
+          paused = true;
+          resolveEntered();
+          await releasePromise;
+        }
+        return base.set(items);
+      },
+    };
+
+    const store = new LibraryStore(driver);
+    setStoreForTests(store);
+
+    let tabs = [
+      {
+        id: 1,
+        url: "https://a.test",
+        title: "A",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+      },
+      {
+        id: 2,
+        url: "https://b.test",
+        title: "B",
+        windowId: 1,
+        index: 1,
+        pinned: false,
+        active: false,
+      },
+      {
+        id: 3,
+        url: "chrome://settings",
+        title: "Settings",
+        windowId: 1,
+        index: 2,
+        pinned: false,
+        active: false,
+      },
+    ];
+    const removed: number[] = [];
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        id: "test",
+        getURL: (p: string) => `chrome-extension://test/${p}`,
+      },
+      tabs: {
+        get: vi.fn(async (id: number) => {
+          const t = tabs.find((x) => x.id === id);
+          if (!t) throw new Error("Missing tab");
+          return structuredClone(t);
+        }),
+        query: vi.fn(async (q: { windowId?: number; active?: boolean }) =>
+          structuredClone(
+            tabs.filter(
+              (t) =>
+                (q.windowId == null || t.windowId === q.windowId) &&
+                (!q.active || t.active),
+            ),
+          ),
+        ),
+        remove: vi.fn(async (ids: number[]) => {
+          removed.push(...ids);
+          tabs = tabs.filter((t) => !ids.includes(t.id));
+        }),
+      },
+      storage: {
+        session: {
+          get: vi.fn(async () => ({})),
+          set: vi.fn(async () => undefined),
+          remove: vi.fn(async () => undefined),
+        },
+      },
+      action: {
+        setBadgeText: vi.fn(async () => undefined),
+        setBadgeBackgroundColor: vi.fn(async () => undefined),
+        setIcon: vi.fn(async () => undefined),
+      },
+    });
+
+    const aPromise = saveTabs({
+      scope: "current",
+      tabId: 1,
+      confirmedUnsaved: true,
+    });
+    await enteredPromise;
+    const bPromise = saveTabs({
+      scope: "current",
+      tabId: 2,
+      confirmedUnsaved: true,
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    resolveRelease();
+
+    const [resA, resB] = await Promise.all([aPromise, bPromise]);
+    expect(resA.saved).toBe(1);
+    expect(resB.saved).toBe(1);
+    expect(removed).toEqual([1, 2]);
+
+    const finalDb = await store.readDatabase();
+    expect(finalDb.entries).toHaveLength(2);
+    expect(finalDb.entries.map((e) => e.url).sort()).toEqual([
+      "https://a.test",
+      "https://b.test",
+    ]);
+
+    setStoreForTests(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("R202: isValidScope strictly validates scope and empty save returns error", async () => {
+    expect(isValidScope("current")).toBe(true);
+    expect(isValidScope("others")).toBe(true);
+    expect(isValidScope("window")).toBe(true);
+    expect(isValidScope("")).toBe(false);
+    expect(isValidScope("invalid")).toBe(false);
+    expect(isValidScope(null)).toBe(false);
+    expect(isValidScope(undefined)).toBe(false);
+
+    const store = new LibraryStore(
+      memoryDriver({ tabfold_database: createEmptyDatabase() }),
+    );
+    setStoreForTests(store);
+    const res = await saveTabs({ scope: "" as unknown as SaveScope });
+    expect(res.saved).toBe(0);
+    expect(res.message).toBe("Invalid save scope.");
+    setStoreForTests(null);
+  });
+
+  it("R203: JSON import renumbers duplicate IDs and partial restore failure preserves failed URLs", async () => {
+    const payload = JSON.stringify({
+      format: "tabfold-json",
+      schemaVersion: 2,
+      entries: [
+        entry({ id: "same", url: "https://ok.test" }),
+        entry({ id: "same", url: "https://fail.test" }),
+      ],
+    });
+    const imported = importJsonText(payload, []);
+    expect(imported.summary.added).toBe(2);
+    expect(imported.entries[0]?.id).not.toBe(imported.entries[1]?.id);
+
+    const store = new LibraryStore(
+      memoryDriver({
+        tabfold_database: {
+          ...createEmptyDatabase(),
+          entries: imported.entries,
+        },
+      }),
+    );
+    setStoreForTests(store);
+
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create: vi.fn(async (opts: { url?: string }) => {
+          if (opts.url === "https://fail.test")
+            throw new Error("Injected open failure");
+          return { id: 101, ...opts };
+        }),
+      },
+      action: {
+        setBadgeText: vi.fn(async () => undefined),
+        setBadgeBackgroundColor: vi.fn(async () => undefined),
+        setIcon: vi.fn(async () => undefined),
+      },
+    });
+
+    const res = await restoreEntries(imported.entries.map((e) => e.id));
+    expect(res.opened).toBe(1);
+    expect(res.failed).toBe(1);
+    const remaining = (await store.readDatabase()).entries;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.url).toBe("https://fail.test");
+
+    setStoreForTests(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("R204: corrupt raw is preserved in salvage and exportRaw across backup restoration", async () => {
+    const damaged = {
+      schemaVersion: 2,
+      entries: null,
+      recoveryNote: "salvage-data-proof",
+    };
+    const validDb = {
+      ...createEmptyDatabase(),
+      entries: [entry({ id: "bak1", url: "https://bak.test" })],
+    };
+    const store = new LibraryStore(
+      memoryDriver({
+        tabfold_database: damaged,
+        tabfold_backups: [
+          { id: "bak-id", createdAt: 1, reason: "test", database: validDb },
+        ],
+      }),
+    );
+
+    await store.restoreBackup("bak-id");
+    const exported = await store.exportRaw();
+    expect(exported).toContain("salvage-data-proof");
+    expect(exported).toContain("https://bak.test");
+  });
+
+  it("R205: migration write-back CAS persists schema 2 and id across reads", async () => {
+    const raw = {
+      schemaVersion: 1,
+      tabs: [{ url: "https://legacy.test", title: "Old" }],
+    };
+    const base = memoryDriver({ tabfold_database: raw });
+    const store = new LibraryStore(base);
+
+    const firstRead = await store.readDatabase();
+    const storedRaw = (await base.get(["tabfold_database"]))
+      .tabfold_database as { schemaVersion?: number };
+    expect(storedRaw.schemaVersion).toBe(2);
+
+    const secondRead = await store.readDatabase();
+    expect(secondRead.entries[0]?.id).toBe(firstRead.entries[0]?.id);
+    expect(secondRead.entries[0]?.url).toBe("https://legacy.test");
+  });
+
+  it("R206: databaseContentMatches detects changes in settings, stats, and undo", () => {
+    const db = createEmptyDatabase();
+    const withDiffSettings = {
+      ...db,
+      settings: { ...db.settings, theme: "dark" as const },
+    };
+    expect(databaseContentMatches(db, withDiffSettings)).toBe(false);
+
+    const withDiffStats = {
+      ...db,
+      stats: { ...db.stats, totalSaved: 10 },
+    };
+    expect(databaseContentMatches(db, withDiffStats)).toBe(false);
+
+    const withDiffUndo = {
+      ...db,
+      undo: { ids: ["x"], expiresAt: Date.now() + 5000 },
+    };
+    expect(databaseContentMatches(db, withDiffUndo)).toBe(false);
+  });
+
+  it("R207: distinct paths with trailing slashes are preserved on dedupe", () => {
+    expect(urlsEqual("https://site.test/page", "https://site.test/page/")).toBe(
+      false,
+    );
+    const imported = importPlainTextList(
+      "https://site.test/page\nhttps://site.test/page/",
+      [],
+    );
+    expect(imported.summary.added).toBe(2);
+  });
+
+  it("R208: audio confirm requires token binding and boolean cannot bypass", async () => {
+    const store = new LibraryStore(
+      memoryDriver({
+        tabfold_database: {
+          ...createEmptyDatabase(),
+          settings: {
+            ...createEmptyDatabase().settings,
+            onboardingComplete: true,
+            unsavedHintAcknowledged: true,
+          },
+        },
+      }),
+    );
+    setStoreForTests(store);
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        id: "test",
+        getURL: (p: string) => `chrome-extension://test/${p}`,
+      },
+      tabs: {
+        get: vi.fn(async () => ({
+          id: 1,
+          url: "https://audio.test",
+          title: "Audio",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+          audible: true,
+        })),
+        query: vi.fn(async () => [
+          {
+            id: 1,
+            url: "https://audio.test",
+            title: "Audio",
+            windowId: 1,
+            index: 0,
+            pinned: false,
+            active: true,
+            audible: true,
+          },
+        ]),
+        remove: vi.fn(async () => undefined),
+      },
+      storage: {
+        session: {
+          get: vi.fn(async () => ({})),
+          set: vi.fn(async () => undefined),
+          remove: vi.fn(async () => undefined),
+        },
+      },
+      action: {
+        setBadgeText: vi.fn(async () => undefined),
+        setBadgeBackgroundColor: vi.fn(async () => undefined),
+        setIcon: vi.fn(async () => undefined),
+      },
+    });
+
+    const bypassResult = await saveTabs({
+      scope: "current",
+      tabId: 1,
+      confirmedAudio: true,
+      confirmedUnsaved: true,
+    });
+    expect(bypassResult.saved).toBe(0);
+    expect(bypassResult.needsConfirmation).toHaveLength(1);
+    expect(bypassResult.confirmToken).toBeTruthy();
+
+    setStoreForTests(null);
+    vi.unstubAllGlobals();
   });
 });
