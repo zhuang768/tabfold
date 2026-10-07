@@ -16,8 +16,8 @@
 
 ## 儲存
 
-- 選 `storage.local` + `unlimitedStorage`：官方文件指出 local 預設約 10MB，大量條目與快照需要餘裕（見 RESEARCH）。
-- 代價：權限提示較醒目；換得本機可靠性與不做 sync。
+- 選 `storage.local` + `unlimitedStorage`：官方文件指出 local 預設約 10MB，大量條目與快照需要充裕空間（見 RESEARCH）；官方規範中 `unlimitedStorage` 不觸發安裝時危險警告彈窗。
+- 取捨：換取本機資料安全與純淨單一 JSON 來源，不做高風險遠端 sync。
 - `MutationQueue` + `revision` + **完整欄位**讀回驗證：並行 save／import／clear 不互相覆寫。
 - 滾動快照：清空／匯入／demo／重置／較大庫變更前保留最近 5 份；毀損不靜默清空，保留 raw 可匯出。
 - v1 遷移：穩定 id（內容雜湊）、遷移後持久化；未知新版拒收。

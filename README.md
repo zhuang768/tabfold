@@ -4,7 +4,7 @@ Save tabs. Free memory. Open them later.
 
 Tabfold is a **local-only** Chrome Manifest V3 extension. Click the toolbar icon to save the current tab’s URL, title, and favicon, then close the tab. Restore anytime from the popup or full library page.
 
-**Requirements:** Node.js **≥ 20**, npm, and a system that can run Playwright’s bundled Chromium (macOS / Linux / Windows). Packaging uses Node `fs` + the system `zip` CLI when available (falls back to a pure-JS zip writer). **Minimum Chrome: 127** (for `chrome.action.openPopup`).
+**Requirements:** Node.js **^20.19.0 || ^22.13.0 || >=24.0.0**, npm, and a system with Playwright bundled Chromium installed (`npx playwright install chromium`). Packaging requires system `zip` (macOS/Linux) or PowerShell `Compress-Archive` (Windows). **Minimum Chrome: 127** (for `chrome.action.openPopup`).
 
 ## Features
 
@@ -19,6 +19,7 @@ Tabfold is a **local-only** Chrome Manifest V3 extension. Click the toolbar icon
 - First-run onboarding (≤3 steps, skippable) + unsaved-content ack before first close
 - Demo data button (real local entries, not fake API results)
 - Local favicons via Chrome’s `/_favicon/` API (no outbound image requests)
+- Memory estimation disclaimer: UI stats indicate freed memory based on `~50MB * closed tab count` as an approximate estimation, not live OS memory telemetry
 
 ## Permissions (why each exists)
 
@@ -73,7 +74,7 @@ npm audit
 
 - Unit tests: Vitest
 - E2E: Playwright loads the **unpacked** extension in an isolated profile under `/tmp` (no spaces). First run installs Playwright browsers via `npx playwright install chromium` if needed.
-- Perf: writes raw samples to `output/supervision/round-1/perf-samples.json`
+- Perf: writes raw samples to `output/perf/perf-samples.json` (measures true UI interactive readiness, document scroll, and p50/p95)
 
 E2E artifacts: `output/playwright/` (screenshots, traces).
 

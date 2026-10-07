@@ -24,7 +24,7 @@ Click the Tabfold icon to save the current tab’s address, title, and icon, the
 - Everything stays on your device
 
 **Permissions**
-Tabfold asks only for storage, tabs, alarms, and context menus — each explained in the project README.
+Tabfold asks only for storage, unlimitedStorage, tabs, favicon, and context menus — each explained in the project README. No remote code, no analytics, no alarms.
 
 ## Screenshot shot list (capture manually)
 
