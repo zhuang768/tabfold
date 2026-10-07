@@ -24,6 +24,7 @@ function showStatus(
   message: string,
   kind: "ok" | "warn" | "danger" = "ok",
   undoIds: string[] = [],
+  ttlMs = 12_000,
 ): void {
   const el = $("status");
   el.hidden = false;
@@ -35,13 +36,14 @@ function showStatus(
   if (undoIds.length) {
     const btn = document.createElement("button");
     btn.type = "button";
+    btn.id = "btn-undo";
     btn.textContent = STRINGS.undo;
     btn.addEventListener("click", () => void doUndo());
     el.append(btn);
     if (undoTimer) window.clearTimeout(undoTimer);
     undoTimer = window.setTimeout(() => {
       el.querySelectorAll("button").forEach((b) => b.remove());
-    }, 12_000);
+    }, ttlMs);
   }
 }
 
@@ -149,6 +151,7 @@ function renderList(entries: SavedTab[]): void {
     actions.className = "stack";
     const restore = document.createElement("button");
     restore.type = "button";
+    restore.className = "btn-restore";
     restore.textContent = STRINGS.restore;
     restore.addEventListener("click", () => {
       row.classList.add("restoring");
@@ -168,15 +171,23 @@ function renderList(entries: SavedTab[]): void {
   }
 }
 
+let isRestoring = false;
+
 async function restoreOne(id: string): Promise<void> {
-  const res = await send<{ message: string }>({
-    type: "restore",
-    ids: [id],
-    mode: "all",
-  });
-  if (!res.ok) showStatus(res.error, "danger");
-  else showStatus(res.data.message, "ok");
-  await load();
+  if (isRestoring) return;
+  isRestoring = true;
+  try {
+    const res = await send<{ message: string }>({
+      type: "restore",
+      ids: [id],
+      mode: "all",
+    });
+    if (!res.ok) showStatus(res.error, "danger");
+    else showStatus(res.data.message, "ok");
+    await load();
+  } finally {
+    isRestoring = false;
+  }
 }
 
 async function deleteOne(id: string): Promise<void> {
@@ -241,13 +252,17 @@ async function load(): Promise<void> {
   }>({ type: "get-state" });
 
   if (!res.ok) {
+    database = null;
     list.replaceChildren();
+    text($("count"), "");
     showStatus(res.error, "danger");
     return;
   }
 
   if (res.data.corrupt || !res.data.database) {
+    database = null;
     list.replaceChildren();
+    text($("count"), "");
     showStatus(res.data.message ?? STRINGS.corruptedTitle, "danger");
     const box = document.createElement("div");
     box.className = "error-box stack";
@@ -298,6 +313,22 @@ async function load(): Promise<void> {
       STRINGS.estimatedMemoryClosed(mb),
     ),
   );
+
+  const statusEl = $("status");
+  const hasExistingStatus =
+    !statusEl.hidden &&
+    (statusEl.textContent.trim().length > 0 || statusEl.children.length > 0);
+  if (
+    database.undo &&
+    database.undo.expiresAt > Date.now() &&
+    database.undo.ids.length > 0 &&
+    !hasExistingStatus
+  ) {
+    const count = database.undo.ids.length;
+    const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
+    const remainingMs = Math.max(0, database.undo.expiresAt - Date.now());
+    showStatus(msg, "ok", database.undo.ids, remainingMs);
+  }
 }
 
 async function handleSaveResult(data: SaveResult): Promise<void> {
@@ -377,21 +408,8 @@ async function init(): Promise<void> {
   text($("btn-demo"), STRINGS.loadDemo);
   text($("btn-library"), STRINGS.openFullList);
   text($("btn-settings"), STRINGS.openSettings);
+  text($("label-search"), STRINGS.searchLabel);
   ($("search") as HTMLInputElement).placeholder = STRINGS.searchPlaceholder;
-
-  const session = await chrome.storage.session.get([
-    "lastSaveResult",
-    "lastSaveAt",
-  ]);
-  const last = session.lastSaveResult as SaveResult | undefined;
-  const at = session.lastSaveAt as number | undefined;
-  if (last && at && Date.now() - at < 15_000) {
-    await handleSaveResult(last);
-    await chrome.storage.session.remove([
-      "lastSaveResult",
-      "pendingAudioConfirm",
-    ]);
-  }
 
   $("btn-save").addEventListener("click", () => void saveWithScope());
   $("btn-hibernate").addEventListener("click", async () => {
@@ -409,16 +427,12 @@ async function init(): Promise<void> {
       showStatus(STRINGS.pickWebTab, "warn");
       return;
     }
-    const candidate = tabs.data.tabs.find((t) => !t.active && !t.discarded);
-    if (!candidate) {
-      showStatus(STRINGS.noInactiveTabs, "warn");
+    const currentTab = tabs.data.tabs.find((t) => t.active);
+    if (currentTab) {
+      showStatus(STRINGS.activeCannotHibernate, "warn");
       return;
     }
-    const res = await send({ type: "discard-tab", tabId: candidate.id });
-    showStatus(
-      res.ok ? STRINGS.hibernateOk : res.error,
-      res.ok ? "ok" : "danger",
-    );
+    showStatus(STRINGS.pickWebTab, "warn");
   });
   $("btn-library").addEventListener(
     "click",
@@ -428,6 +442,24 @@ async function init(): Promise<void> {
     "click",
     () => void chrome.runtime.openOptionsPage(),
   );
+
+  try {
+    const session = await chrome.storage.session.get([
+      "lastSaveResult",
+      "lastSaveAt",
+    ]);
+    const last = session?.lastSaveResult as SaveResult | undefined;
+    const at = session?.lastSaveAt as number | undefined;
+    if (last && at && Date.now() - at < 15_000) {
+      await handleSaveResult(last);
+      await chrome.storage.session.remove([
+        "lastSaveResult",
+        "pendingAudioConfirm",
+      ]);
+    }
+  } catch {
+    // Session read error non-fatal
+  }
   $("btn-export").addEventListener("click", async () => {
     const res = await send<{ text: string }>({ type: "export-json" });
     if (res.ok)
@@ -441,34 +473,42 @@ async function init(): Promise<void> {
     await load();
   });
   $("btn-restore-all").addEventListener("click", async () => {
-    if (!database?.entries.length) return;
-    const ids = database.entries.map((e) => e.id);
-    const res = await send<{
-      message: string;
-      needsBatchChoice?: boolean;
-      pendingIds?: string[];
-    }>({ type: "restore", ids });
-    if (!res.ok) {
-      showStatus(res.error, "danger");
-      return;
-    }
-    if (res.data.needsBatchChoice) {
-      const choice = await batchDialog(res.data.message);
-      if (choice === "cancel") {
-        showStatus(STRINGS.nothingSaved, "warn");
+    if (!database?.entries.length || isRestoring) return;
+    isRestoring = true;
+    const btn = $("btn-restore-all");
+    btn.setAttribute("aria-busy", "true");
+    try {
+      const ids = database.entries.map((e) => e.id);
+      const res = await send<{
+        message: string;
+        needsBatchChoice?: boolean;
+        pendingIds?: string[];
+      }>({ type: "restore", ids });
+      if (!res.ok) {
+        showStatus(res.error, "danger");
         return;
       }
-      const again = await send<{ message: string }>({
-        type: "restore",
-        ids: res.data.pendingIds ?? ids,
-        mode: choice,
-      });
-      if (again.ok) showStatus(again.data.message, "ok");
-      else showStatus(again.error, "danger");
-    } else {
-      showStatus(res.data.message, "ok");
+      if (res.data.needsBatchChoice) {
+        const choice = await batchDialog(res.data.message);
+        if (choice === "cancel") {
+          showStatus(STRINGS.nothingSaved, "warn");
+          return;
+        }
+        const again = await send<{ message: string }>({
+          type: "restore",
+          ids: res.data.pendingIds ?? ids,
+          mode: choice,
+        });
+        if (again.ok) showStatus(again.data.message, "ok");
+        else showStatus(again.error, "danger");
+      } else {
+        showStatus(res.data.message, "ok");
+      }
+      await load();
+    } finally {
+      isRestoring = false;
+      btn.removeAttribute("aria-busy");
     }
-    await load();
   });
   $("search").addEventListener("input", (e) => {
     query = (e.target as HTMLInputElement).value;

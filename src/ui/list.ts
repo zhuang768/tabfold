@@ -33,6 +33,7 @@ function showStatus(
   message: string,
   kind: "ok" | "warn" | "danger" = "ok",
   undoIds: string[] = [],
+  ttlMs = 12_000,
 ): void {
   const el = $("status");
   el.hidden = false;
@@ -44,13 +45,14 @@ function showStatus(
   if (undoIds.length) {
     const btn = document.createElement("button");
     btn.type = "button";
+    btn.id = "btn-undo";
     btn.textContent = STRINGS.undo;
     btn.addEventListener("click", () => void doUndo());
     el.append(btn);
     if (undoTimer) window.clearTimeout(undoTimer);
     undoTimer = window.setTimeout(() => {
       el.querySelectorAll("button").forEach((b) => b.remove());
-    }, 12_000);
+    }, ttlMs);
   }
 }
 
@@ -96,33 +98,41 @@ async function batchDialog(
   });
 }
 
+let isRestoring = false;
+
 async function restoreWithGuard(ids: string[]): Promise<void> {
-  const res = await send<{
-    message: string;
-    needsBatchChoice?: boolean;
-    pendingIds?: string[];
-  }>({ type: "restore", ids });
-  if (!res.ok) {
-    showStatus(res.error, "danger");
-    return;
-  }
-  if (res.data.needsBatchChoice) {
-    const choice = await batchDialog(res.data.message);
-    if (choice === "cancel") {
-      showStatus(STRINGS.cancel, "warn");
+  if (isRestoring || !ids.length) return;
+  isRestoring = true;
+  try {
+    const res = await send<{
+      message: string;
+      needsBatchChoice?: boolean;
+      pendingIds?: string[];
+    }>({ type: "restore", ids });
+    if (!res.ok) {
+      showStatus(res.error, "danger");
       return;
     }
-    const again = await send<{ message: string }>({
-      type: "restore",
-      ids: res.data.pendingIds ?? ids,
-      mode: choice,
-    });
-    if (again.ok) showStatus(again.data.message, "ok");
-    else showStatus(again.error, "danger");
-  } else {
-    showStatus(res.data.message, "ok");
+    if (res.data.needsBatchChoice) {
+      const choice = await batchDialog(res.data.message);
+      if (choice === "cancel") {
+        showStatus(STRINGS.nothingSaved, "warn");
+        return;
+      }
+      const again = await send<{ message: string }>({
+        type: "restore",
+        ids: res.data.pendingIds ?? ids,
+        mode: choice,
+      });
+      if (again.ok) showStatus(again.data.message, "ok");
+      else showStatus(again.error, "danger");
+    } else {
+      showStatus(res.data.message, "ok");
+    }
+    await load();
+  } finally {
+    isRestoring = false;
   }
-  await load();
 }
 
 function renderGroups(db: Database): void {
@@ -203,6 +213,7 @@ function renderList(entries: SavedTab[]): void {
     actions.className = "row";
     const restore = document.createElement("button");
     restore.type = "button";
+    restore.className = "btn-restore";
     restore.textContent = STRINGS.restore;
     restore.addEventListener("click", async () => {
       row.classList.add("restoring");
@@ -291,10 +302,20 @@ async function load(): Promise<void> {
     message?: string;
   }>({ type: "get-state" });
   if (!res.ok) {
+    database = null;
+    $("list").replaceChildren();
+    const select = $("target-tab") as HTMLSelectElement;
+    select.replaceChildren();
+    select.value = "";
     showStatus(res.error, "danger");
     return;
   }
   if (!res.data.database) {
+    database = null;
+    $("list").replaceChildren();
+    const select = $("target-tab") as HTMLSelectElement;
+    select.replaceChildren();
+    select.value = "";
     showStatus(res.data.message ?? STRINGS.corruptedTitle, "danger");
     return;
   }
@@ -303,12 +324,21 @@ async function load(): Promise<void> {
   renderStats(database);
   renderGroups(database);
   paint();
+
+  const statusEl = $("status");
+  const hasExistingStatus =
+    !statusEl.hidden &&
+    (statusEl.textContent.trim().length > 0 || statusEl.children.length > 0);
   if (
     database.undo &&
     database.undo.expiresAt > Date.now() &&
-    database.undo.ids.length > 0
+    database.undo.ids.length > 0 &&
+    !hasExistingStatus
   ) {
-    showStatus(STRINGS.savedOne, "ok", database.undo.ids);
+    const count = database.undo.ids.length;
+    const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
+    const remainingMs = Math.max(0, database.undo.expiresAt - Date.now());
+    showStatus(msg, "ok", database.undo.ids, remainingMs);
   }
   await refreshTargets();
 }
@@ -344,61 +374,49 @@ async function init(): Promise<void> {
       scope: "current",
       tabIds: [id],
     });
-    if (!res.ok) {
-      showStatus(res.error, "danger");
-      return;
+    let currentRes = res;
+    let attempts = 0;
+    while (currentRes.ok && attempts++ < 5) {
+      if (currentRes.data.needsUnsavedAck && currentRes.data.confirmToken) {
+        const ok = window.confirm(STRINGS.unsavedHintBefore);
+        if (!ok) {
+          showStatus(STRINGS.nothingSaved, "warn");
+          return;
+        }
+        currentRes = await send<SaveResult>({
+          type: "save",
+          confirmToken: currentRes.data.confirmToken,
+          confirmedUnsaved: true,
+        });
+        continue;
+      }
+      if (
+        currentRes.data.needsConfirmation.length &&
+        currentRes.data.confirmToken
+      ) {
+        const ok = window.confirm(STRINGS.audioConfirm);
+        if (!ok) {
+          showStatus(STRINGS.nothingSaved, "warn");
+          return;
+        }
+        currentRes = await send<SaveResult>({
+          type: "save",
+          confirmedAudio: true,
+          confirmedUnsaved: true,
+          confirmToken: currentRes.data.confirmToken,
+        });
+        continue;
+      }
+      break;
     }
-    if (res.data.needsUnsavedAck && res.data.confirmToken) {
-      const ok = window.confirm(STRINGS.unsavedHintBefore);
-      if (!ok) {
-        showStatus(STRINGS.nothingSaved, "warn");
-        return;
-      }
-      const again = await send<SaveResult>({
-        type: "save",
-        confirmToken: res.data.confirmToken,
-        confirmedUnsaved: true,
-      });
-      if (again.ok) {
-        showStatus(
-          again.data.message,
-          again.data.saved ? "ok" : "warn",
-          again.data.undoIds,
-        );
-        await load();
-      } else {
-        showStatus(again.error, "danger");
-      }
-      return;
-    }
-    if (res.data.needsConfirmation.length && res.data.confirmToken) {
-      const ok = window.confirm(STRINGS.audioConfirm);
-      if (!ok) {
-        showStatus(STRINGS.nothingSaved, "warn");
-        return;
-      }
-      const again = await send<SaveResult>({
-        type: "save",
-        confirmedAudio: true,
-        confirmedUnsaved: true,
-        confirmToken: res.data.confirmToken,
-      });
-      if (again.ok) {
-        showStatus(
-          again.data.message,
-          again.data.saved ? "ok" : "warn",
-          again.data.undoIds,
-        );
-        await load();
-      } else {
-        showStatus(again.error, "danger");
-      }
+    if (!currentRes.ok) {
+      showStatus(currentRes.error, "danger");
       return;
     }
     showStatus(
-      res.data.message,
-      res.data.saved ? "ok" : "warn",
-      res.data.undoIds,
+      currentRes.data.message,
+      currentRes.data.saved ? "ok" : "warn",
+      currentRes.data.undoIds,
     );
     await load();
   });
@@ -422,8 +440,14 @@ async function init(): Promise<void> {
     () => void refreshTargets(),
   );
   $("btn-restore-all").addEventListener("click", async () => {
-    if (!database) return;
-    await restoreWithGuard(database.entries.map((e) => e.id));
+    if (!database?.entries.length || isRestoring) return;
+    const btn = $("btn-restore-all");
+    btn.setAttribute("aria-busy", "true");
+    try {
+      await restoreWithGuard(database.entries.map((e) => e.id));
+    } finally {
+      btn.removeAttribute("aria-busy");
+    }
   });
   $("btn-settings").addEventListener(
     "click",
@@ -463,30 +487,60 @@ async function init(): Promise<void> {
     paint();
   });
   $("import-json").addEventListener("change", async (e) => {
-    const file = (e.target as HTMLInputElement).files?.[0];
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
     if (!file) return;
-    const textContent = await file.text();
-    const res = await send<{ summary: ImportSummary }>({
-      type: "import-json",
-      text: textContent,
-    });
-    if (res.ok) showStatus(res.data.summary.message, "ok");
-    else showStatus(res.error, "danger");
-    await load();
-    (e.target as HTMLInputElement).value = "";
+    try {
+      const textContent = await file.text();
+      const res = await send<{ summary: ImportSummary }>({
+        type: "import-json",
+        text: textContent,
+      });
+      if (res.ok) showStatus(res.data.summary.message, "ok");
+      else showStatus(res.error, "danger");
+      await load();
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === "object" &&
+              err !== null &&
+              "message" in err &&
+              typeof (err as { message: unknown }).message === "string"
+            ? (err as { message: string }).message
+            : "File read failed";
+      showStatus(msg, "danger");
+    } finally {
+      input.value = "";
+    }
   });
   $("import-text").addEventListener("change", async (e) => {
-    const file = (e.target as HTMLInputElement).files?.[0];
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
     if (!file) return;
-    const textContent = await file.text();
-    const res = await send<{ summary: ImportSummary }>({
-      type: "import-text",
-      text: textContent,
-    });
-    if (res.ok) showStatus(res.data.summary.message, "ok");
-    else showStatus(res.error, "danger");
-    await load();
-    (e.target as HTMLInputElement).value = "";
+    try {
+      const textContent = await file.text();
+      const res = await send<{ summary: ImportSummary }>({
+        type: "import-text",
+        text: textContent,
+      });
+      if (res.ok) showStatus(res.data.summary.message, "ok");
+      else showStatus(res.error, "danger");
+      await load();
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === "object" &&
+              err !== null &&
+              "message" in err &&
+              typeof (err as { message: unknown }).message === "string"
+            ? (err as { message: string }).message
+            : "File read failed";
+      showStatus(msg, "danger");
+    } finally {
+      input.value = "";
+    }
   });
   ($("edit-dialog") as unknown as HTMLDialogElement).addEventListener(
     "close",

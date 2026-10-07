@@ -38,6 +38,8 @@ export const STRINGS = {
   ok: "OK",
   hibernatedSuffix: " (hibernated)",
   noInactiveTabs: "No inactive background tabs available to hibernate.",
+  activeCannotHibernate:
+    "The active tab cannot be hibernated. Pick another tab in the full list.",
   backupReasonBeforeRestore: "before-restore-backup",
   backupReasonBeforeReset: "before-reset",
   backupReasonBeforeImport: "before-import",
@@ -144,7 +146,7 @@ export const STRINGS = {
   // Settings
   settingsTitle: "Settings",
   removeAfterRestore: "Remove from list after restore",
-  defaultScope: "Default save scope (popup / library)",
+  defaultScope: "Default save scope for popup:",
   theme: "Theme",
   themeSystem: "System",
   themeLight: "Light",
@@ -156,12 +158,42 @@ export const STRINGS = {
   scopeOthers: "Other tabs in window",
   scopeWindow: "All tabs in window",
   saveSettings: "Save settings",
+  whereDataTitle: "Where is my data stored?",
+  backupReasonLabels: {
+    manual: "Manual snapshot",
+    "before-import": "Automatic snapshot before import",
+    "before-import-text": "Automatic snapshot before text import",
+    "before-clear": "Automatic snapshot before clearing tabs",
+    "before-restore": "Automatic snapshot before restore",
+    "before-restore-backup": "Automatic snapshot before restoring snapshot",
+    "before-migration": "Automatic snapshot before migration",
+    "before-reset": "Automatic snapshot before reset",
+    "before-demo": "Automatic snapshot before loading demo",
+  } as Record<string, string>,
+  backupReasonLabel: (reason: string): string =>
+    STRINGS.backupReasonLabels[reason] ?? reason,
+  backupTabsCount: (n: number): string => (n === 1 ? "1 tab" : `${n} tabs`),
+  confirmRestoreSnapshot: (timeStr: string): string =>
+    `Restore snapshot from ${timeStr}?`,
+
+  // System & errors
+  tabGone: "Tab is no longer available.",
+  noActiveTab: "No active tab found.",
+  missingTabId: "Missing tabId.",
+  tabNotFound: "Tab not found.",
+  cannotHibernateActive: "Cannot hibernate active tab.",
+  cannotHibernateMedia: "Cannot hibernate media tabs.",
+  invalidSettingsPatch: "Invalid settings patch.",
+  invalidBatchSize: "restoreBatchSize must be a number between 1 and 500.",
+  searchLabel: "Search saved tabs",
 
   // Menus / a11y
   menuSaveTab: "Save tab with Tabfold",
   menuSaveOthers: "Save other tabs in window",
   menuHibernate: "Hibernate tab (keep open, free memory)",
   menuOpenLibrary: "Open Tabfold library",
+  commandSaveDesc: "Save current tab",
+  commandLibraryDesc: "Open Tabfold library",
   closeDialog: "Close dialog",
   faviconAlt: "Site icon",
   statusRegion: "Status messages",

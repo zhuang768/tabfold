@@ -13,11 +13,13 @@ const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 
 let isFormDirty = false;
+let statusGen = 0;
 
 function showStatus(
   message: string,
   kind: "ok" | "warn" | "danger" = "ok",
 ): void {
+  statusGen++;
   const el = $("status");
   el.hidden = false;
   el.className = `banner fold ${kind}`;
@@ -52,13 +54,15 @@ async function load(): Promise<void> {
       const row = document.createElement("div");
       row.className = "row";
       const info = document.createElement("span");
-      info.textContent = `${formatTime(b.createdAt)} · ${b.reason} · ${b.entryCount} tabs`;
+      info.textContent = `${formatTime(b.createdAt)} · ${STRINGS.backupReasonLabel(b.reason)} · ${STRINGS.backupTabsCount(b.entryCount)}`;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.textContent = STRINGS.restoreBackup;
       btn.addEventListener("click", async () => {
         if (
-          !window.confirm(`Restore snapshot from ${formatTime(b.createdAt)}?`)
+          !window.confirm(
+            STRINGS.confirmRestoreSnapshot(formatTime(b.createdAt)),
+          )
         )
           return;
         const r = await send({ type: "restore-backup", id: b.id });
@@ -130,6 +134,7 @@ async function init(): Promise<void> {
   text($("label-theme"), STRINGS.theme);
   text($("label-whitelist"), STRINGS.whitelist);
   text($("whitelist-hint"), STRINGS.whitelistHint);
+  text($("where-title"), STRINGS.whereDataTitle);
   text($("where-data"), STRINGS.whereDataStored);
   text($("backups-title"), STRINGS.backups);
   text($("btn-save"), STRINGS.saveSettings);
@@ -156,12 +161,17 @@ async function init(): Promise<void> {
   });
 
   $("btn-save").addEventListener("click", async () => {
-    const patch: Partial<Settings> = {
+    const submittedForm = {
       removeAfterRestore: ($("remove-after") as HTMLInputElement).checked,
-      defaultScope: ($("default-scope") as HTMLSelectElement)
-        .value as Settings["defaultScope"],
-      theme: ($("theme") as HTMLSelectElement).value as Settings["theme"],
-      whitelist: ($("whitelist") as HTMLTextAreaElement).value
+      defaultScope: ($("default-scope") as HTMLSelectElement).value,
+      theme: ($("theme") as HTMLSelectElement).value,
+      whitelist: ($("whitelist") as HTMLTextAreaElement).value,
+    };
+    const patch: Partial<Settings> = {
+      removeAfterRestore: submittedForm.removeAfterRestore,
+      defaultScope: submittedForm.defaultScope as Settings["defaultScope"],
+      theme: submittedForm.theme as Settings["theme"],
+      whitelist: submittedForm.whitelist
         .split("\n")
         .map((l) => l.trim())
         .filter(Boolean),
@@ -171,9 +181,23 @@ async function init(): Promise<void> {
       showStatus(res.error || STRINGS.settingsSaveFailed, "danger");
       return;
     }
-    isFormDirty = false;
+    const currentForm = {
+      removeAfterRestore: ($("remove-after") as HTMLInputElement).checked,
+      defaultScope: ($("default-scope") as HTMLSelectElement).value,
+      theme: ($("theme") as HTMLSelectElement).value,
+      whitelist: ($("whitelist") as HTMLTextAreaElement).value,
+    };
+    const isUnchangedDuringSave =
+      currentForm.removeAfterRestore === submittedForm.removeAfterRestore &&
+      currentForm.defaultScope === submittedForm.defaultScope &&
+      currentForm.theme === submittedForm.theme &&
+      currentForm.whitelist === submittedForm.whitelist;
+    if (isUnchangedDuringSave) {
+      isFormDirty = false;
+    }
     applyTheme(patch.theme ?? "system");
     showStatus(STRINGS.settingsSaved, "ok");
+    const savedGen = statusGen;
     const savedMsg = $("saved-msg");
     if (savedMsg) {
       savedMsg.hidden = false;
@@ -183,7 +207,9 @@ async function init(): Promise<void> {
       }, 1500);
     }
     window.setTimeout(() => {
-      $("status").hidden = true;
+      if (statusGen === savedGen) {
+        $("status").hidden = true;
+      }
     }, 1500);
   });
 
