@@ -31,7 +31,11 @@
 
       <div class="row wrap actions">
         <button type="button" class="primary" id="btn-save"></button>
-        <select id="scope" aria-label="Save scope"></select>
+        <select id="scope" aria-label="Save scope">
+          <option value="current">Current tab</option>
+          <option value="others">Other tabs</option>
+          <option value="window">Entire window</option>
+        </select>
         <button type="button" id="btn-hibernate"></button>
       </div>
 
@@ -53,9 +57,12 @@
         <p id="confirm-text"></p>
         <div class="row" id="confirm-actions">
           <button type="submit" value="cancel" id="confirm-cancel"></button>
-          <button type="submit" value="ok" class="primary" id="confirm-ok">
-            OK
-          </button>
+          <button
+            type="submit"
+            value="ok"
+            class="primary"
+            id="confirm-ok"
+          ></button>
         </div>
       </form>
     </dialog>

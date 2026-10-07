@@ -121,7 +121,6 @@ button.primary:hover {
   color: #f7f6f3;
 }
 
-:root[data-theme="dark"] button.primary,
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) button.primary:hover {
     background: #c8c7c0;

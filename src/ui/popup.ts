@@ -97,8 +97,12 @@ function renderOnboarding(settings: Database["settings"]): void {
 }
 
 async function finishOnboarding(): Promise<void> {
-  await send({ type: "complete-onboarding" });
-  $("onboarding").hidden = true;
+  const res = await send({ type: "complete-onboarding" });
+  if (res.ok) {
+    $("onboarding").hidden = true;
+  } else {
+    showStatus(res.error, "danger");
+  }
 }
 
 function renderList(entries: SavedTab[]): void {
@@ -187,7 +191,7 @@ async function confirmDialog(message: string): Promise<boolean> {
   text($("confirm-title"), STRINGS.confirmDialogLabel);
   text($("confirm-text"), message);
   text($("confirm-cancel"), STRINGS.cancel);
-  text($("confirm-ok"), "OK");
+  text($("confirm-ok"), STRINGS.ok);
   dialog.showModal();
   return await new Promise((resolve) => {
     dialog.addEventListener(
@@ -297,7 +301,7 @@ async function load(): Promise<void> {
 }
 
 async function handleSaveResult(data: SaveResult): Promise<void> {
-  if (data.needsUnsavedAck) {
+  if (data.needsUnsavedAck && data.confirmToken) {
     const ok = await confirmDialog(STRINGS.unsavedHintBefore);
     if (!ok) {
       showStatus(STRINGS.nothingSaved, "warn");
@@ -305,8 +309,7 @@ async function handleSaveResult(data: SaveResult): Promise<void> {
     }
     const again = await send<SaveResult>({
       type: "save",
-      scope: ($("scope") as HTMLSelectElement).value as
-        "current" | "others" | "window",
+      confirmToken: data.confirmToken,
       confirmedUnsaved: true,
       confirmedAudio: false,
     });
@@ -345,7 +348,24 @@ async function saveWithScope(): Promise<void> {
   await handleSaveResult(res.data);
 }
 
+function initScopeSelect(): void {
+  const scope = $("scope") as HTMLSelectElement;
+  if (!scope.options.length) {
+    for (const [v, label] of [
+      ["current", STRINGS.scopeCurrent],
+      ["others", STRINGS.scopeOthers],
+      ["window", STRINGS.scopeWindow],
+    ] as const) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = label;
+      scope.append(o);
+    }
+  }
+}
+
 async function init(): Promise<void> {
+  initScopeSelect();
   // Clear sticky action popup so next toolbar click saves again (C10)
   void send({ type: "clear-action-popup" });
 
@@ -375,15 +395,26 @@ async function init(): Promise<void> {
 
   $("btn-save").addEventListener("click", () => void saveWithScope());
   $("btn-hibernate").addEventListener("click", async () => {
-    const tabs = await send<{ tabs: Array<{ id: number; title: string }> }>({
+    const tabs = await send<{
+      tabs: Array<{
+        id: number;
+        title: string;
+        active: boolean;
+        discarded: boolean;
+      }>;
+    }>({
       type: "list-window-tabs",
     });
     if (!tabs.ok || !tabs.data.tabs.length) {
       showStatus(STRINGS.pickWebTab, "warn");
       return;
     }
-    const first = tabs.data.tabs[0]!;
-    const res = await send({ type: "discard-tab", tabId: first.id });
+    const candidate = tabs.data.tabs.find((t) => !t.active && !t.discarded);
+    if (!candidate) {
+      showStatus(STRINGS.noInactiveTabs, "warn");
+      return;
+    }
+    const res = await send({ type: "discard-tab", tabId: candidate.id });
     showStatus(
       res.ok ? STRINGS.hibernateOk : res.error,
       res.ok ? "ok" : "danger",

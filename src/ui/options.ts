@@ -12,10 +12,16 @@ import {
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 
-function showMsg(el: HTMLElement, message: string, ok: boolean): void {
+let isFormDirty = false;
+
+function showStatus(
+  message: string,
+  kind: "ok" | "warn" | "danger" = "ok",
+): void {
+  const el = $("status");
   el.hidden = false;
+  el.className = `banner fold ${kind}`;
   el.textContent = message;
-  el.className = ok ? "muted" : "banner danger";
 }
 
 async function load(): Promise<void> {
@@ -28,6 +34,7 @@ async function load(): Promise<void> {
 
   if (!res.ok) {
     text($("where-data"), res.error);
+    showStatus(res.error, "danger");
     return;
   }
 
@@ -56,9 +63,11 @@ async function load(): Promise<void> {
           return;
         const r = await send({ type: "restore-backup", id: b.id });
         if (!r.ok) {
-          showMsg($("saved-msg"), r.error, false);
+          showStatus(r.error, "danger");
           return;
         }
+        isFormDirty = false;
+        showStatus(STRINGS.settingsSaved, "ok");
         await load();
       });
       row.append(info, btn);
@@ -69,6 +78,7 @@ async function load(): Promise<void> {
   if (res.data.corrupt || !res.data.database) {
     text($("where-data"), `${STRINGS.corruptedBody} ${res.data.message ?? ""}`);
     $("settings-form").hidden = true;
+    showStatus(res.data.message ?? STRINGS.corruptedTitle, "danger");
     return;
   }
 
@@ -76,10 +86,15 @@ async function load(): Promise<void> {
   text($("where-data"), STRINGS.whereDataStored);
   const settings = res.data.database.settings;
   applyTheme(settings.theme);
-  ($("remove-after") as HTMLInputElement).checked = settings.removeAfterRestore;
-  ($("default-scope") as HTMLSelectElement).value = settings.defaultScope;
-  ($("theme") as HTMLSelectElement).value = settings.theme;
-  ($("whitelist") as HTMLTextAreaElement).value = settings.whitelist.join("\n");
+
+  if (!isFormDirty) {
+    ($("remove-after") as HTMLInputElement).checked =
+      settings.removeAfterRestore;
+    ($("default-scope") as HTMLSelectElement).value = settings.defaultScope;
+    ($("theme") as HTMLSelectElement).value = settings.theme;
+    ($("whitelist") as HTMLTextAreaElement).value =
+      settings.whitelist.join("\n");
+  }
 }
 
 function fillSelects(): void {
@@ -127,6 +142,19 @@ async function init(): Promise<void> {
 
   fillSelects();
 
+  $("remove-after").addEventListener("change", () => {
+    isFormDirty = true;
+  });
+  $("default-scope").addEventListener("change", () => {
+    isFormDirty = true;
+  });
+  $("theme").addEventListener("change", () => {
+    isFormDirty = true;
+  });
+  $("whitelist").addEventListener("input", () => {
+    isFormDirty = true;
+  });
+
   $("btn-save").addEventListener("click", async () => {
     const patch: Partial<Settings> = {
       removeAfterRestore: ($("remove-after") as HTMLInputElement).checked,
@@ -140,13 +168,22 @@ async function init(): Promise<void> {
     };
     const res = await send({ type: "patch-settings", patch });
     if (!res.ok) {
-      showMsg($("saved-msg"), res.error || STRINGS.settingsSaveFailed, false);
+      showStatus(res.error || STRINGS.settingsSaveFailed, "danger");
       return;
     }
+    isFormDirty = false;
     applyTheme(patch.theme ?? "system");
-    showMsg($("saved-msg"), STRINGS.settingsSaved, true);
+    showStatus(STRINGS.settingsSaved, "ok");
+    const savedMsg = $("saved-msg");
+    if (savedMsg) {
+      savedMsg.hidden = false;
+      savedMsg.textContent = STRINGS.settingsSaved;
+      window.setTimeout(() => {
+        savedMsg.hidden = true;
+      }, 1500);
+    }
     window.setTimeout(() => {
-      $("saved-msg").hidden = true;
+      $("status").hidden = true;
     }, 1500);
   });
 
@@ -154,17 +191,22 @@ async function init(): Promise<void> {
     const res = await send<{ text: string }>({ type: "export-json" });
     if (res.ok)
       downloadText(`tabfold-export-${Date.now()}.json`, res.data.text);
-    else showMsg($("saved-msg"), res.error, false);
+    else showStatus(res.error, "danger");
   });
   $("btn-export-raw").addEventListener("click", async () => {
     const res = await send<{ text: string }>({ type: "export-raw" });
     if (res.ok) downloadText(`tabfold-raw-${Date.now()}.json`, res.data.text);
-    else showMsg($("saved-msg"), res.error, false);
+    else showStatus(res.error, "danger");
   });
   $("btn-reset").addEventListener("click", async () => {
     if (!window.confirm(STRINGS.confirmReset)) return;
     const res = await send({ type: "reset-all" });
-    if (!res.ok) showMsg($("saved-msg"), res.error, false);
+    if (!res.ok) {
+      showStatus(res.error, "danger");
+    } else {
+      isFormDirty = false;
+      showStatus(STRINGS.cleared, "ok");
+    }
     await load();
   });
 

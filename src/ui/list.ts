@@ -27,23 +27,48 @@ const $ = <T extends HTMLElement>(id: string) =>
 let database: Database | null = null;
 let query = "";
 let groupFilter = "";
-let reloadTimer: number | null = null;
+let undoTimer: number | null = null;
 
 function showStatus(
   message: string,
   kind: "ok" | "warn" | "danger" = "ok",
+  undoIds: string[] = [],
 ): void {
   const el = $("status");
   el.hidden = false;
-  el.className = `banner ${kind}`;
-  el.textContent = message;
+  el.className = `banner fold ${kind}`;
+  el.replaceChildren();
+  const span = document.createElement("span");
+  span.textContent = message;
+  el.append(span);
+  if (undoIds.length) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = STRINGS.undo;
+    btn.addEventListener("click", () => void doUndo());
+    el.append(btn);
+    if (undoTimer) window.clearTimeout(undoTimer);
+    undoTimer = window.setTimeout(() => {
+      el.querySelectorAll("button").forEach((b) => b.remove());
+    }, 12_000);
+  }
+}
+
+async function doUndo(): Promise<void> {
+  const res = await send<{ message: string }>({ type: "undo" });
+  if (res.ok) {
+    showStatus(res.data.message, "ok");
+    await load();
+  } else {
+    showStatus(res.error, "danger");
+  }
 }
 
 function renderStats(db: Database): void {
   const mb = estimateMemoryFreedMb(db.stats.totalClosed);
   text(
     $("stats"),
-    `${STRINGS.statsOpen}: ${db.entries.length} · ${STRINGS.statsSaved}: ${db.stats.totalClosed} · ${STRINGS.statsRestored}: ${db.stats.totalRestored} · ${STRINGS.statsImported}: ${db.stats.totalImported} · ${STRINGS.estimatedMemoryClosed(mb)}. ${STRINGS.estimatedNotClosed}`,
+    `${STRINGS.statsOpen}: ${db.entries.length} · ${STRINGS.statsSaved}: ${db.stats.totalClosed} · ${STRINGS.statsRestored}: ${db.stats.totalRestored} · ${STRINGS.statsImported}: ${db.stats.totalImported} · ${STRINGS.estimatedMemoryClosed(mb)}. ${STRINGS.estimateDisclaimer}`,
   );
 }
 
@@ -179,7 +204,14 @@ function renderList(entries: SavedTab[]): void {
     const restore = document.createElement("button");
     restore.type = "button";
     restore.textContent = STRINGS.restore;
-    restore.addEventListener("click", () => void restoreWithGuard([entry.id]));
+    restore.addEventListener("click", async () => {
+      row.classList.add("restoring");
+      try {
+        await restoreWithGuard([entry.id]);
+      } catch {
+        row.classList.remove("restoring");
+      }
+    });
     const edit = document.createElement("button");
     edit.type = "button";
     edit.textContent = STRINGS.edit;
@@ -188,10 +220,16 @@ function renderList(entries: SavedTab[]): void {
     del.type = "button";
     del.className = "danger";
     del.textContent = STRINGS.delete;
-    del.addEventListener("click", async () => {
-      const res = await send({ type: "delete", ids: [entry.id] });
-      if (!res.ok) showStatus(res.error, "danger");
-      await load();
+    del.addEventListener("click", () => {
+      row.classList.add("leaving");
+      window.setTimeout(async () => {
+        const res = await send({ type: "delete", ids: [entry.id] });
+        if (!res.ok) {
+          row.classList.remove("leaving");
+          showStatus(res.error, "danger");
+        }
+        await load();
+      }, 180);
     });
     actions.append(restore, edit, del);
     row.append(actions);
@@ -240,7 +278,7 @@ async function refreshTargets(): Promise<void> {
   for (const t of res.data.tabs) {
     const o = document.createElement("option");
     o.value = String(t.id);
-    o.textContent = `${t.title} — ${t.url}${t.discarded ? " (hibernated)" : ""}`;
+    o.textContent = `${t.title} — ${t.url}${t.discarded ? STRINGS.hibernatedSuffix : ""}`;
     select.append(o);
   }
 }
@@ -265,6 +303,13 @@ async function load(): Promise<void> {
   renderStats(database);
   renderGroups(database);
   paint();
+  if (
+    database.undo &&
+    database.undo.expiresAt > Date.now() &&
+    database.undo.ids.length > 0
+  ) {
+    showStatus(STRINGS.savedOne, "ok", database.undo.ids);
+  }
   await refreshTargets();
 }
 
@@ -298,10 +343,35 @@ async function init(): Promise<void> {
       type: "save",
       scope: "current",
       tabIds: [id],
-      confirmedUnsaved: true,
     });
-    if (!res.ok) showStatus(res.error, "danger");
-    else if (res.data.needsConfirmation.length && res.data.confirmToken) {
+    if (!res.ok) {
+      showStatus(res.error, "danger");
+      return;
+    }
+    if (res.data.needsUnsavedAck && res.data.confirmToken) {
+      const ok = window.confirm(STRINGS.unsavedHintBefore);
+      if (!ok) {
+        showStatus(STRINGS.nothingSaved, "warn");
+        return;
+      }
+      const again = await send<SaveResult>({
+        type: "save",
+        confirmToken: res.data.confirmToken,
+        confirmedUnsaved: true,
+      });
+      if (again.ok) {
+        showStatus(
+          again.data.message,
+          again.data.saved ? "ok" : "warn",
+          again.data.undoIds,
+        );
+        await load();
+      } else {
+        showStatus(again.error, "danger");
+      }
+      return;
+    }
+    if (res.data.needsConfirmation.length && res.data.confirmToken) {
       const ok = window.confirm(STRINGS.audioConfirm);
       if (!ok) {
         showStatus(STRINGS.nothingSaved, "warn");
@@ -313,12 +383,23 @@ async function init(): Promise<void> {
         confirmedUnsaved: true,
         confirmToken: res.data.confirmToken,
       });
-      if (again.ok)
-        showStatus(again.data.message, again.data.saved ? "ok" : "warn");
-      else showStatus(again.error, "danger");
-    } else {
-      showStatus(res.data.message, res.data.saved ? "ok" : "warn");
+      if (again.ok) {
+        showStatus(
+          again.data.message,
+          again.data.saved ? "ok" : "warn",
+          again.data.undoIds,
+        );
+        await load();
+      } else {
+        showStatus(again.error, "danger");
+      }
+      return;
     }
+    showStatus(
+      res.data.message,
+      res.data.saved ? "ok" : "warn",
+      res.data.undoIds,
+    );
     await load();
   });
 
@@ -432,6 +513,7 @@ async function init(): Promise<void> {
     }
   });
 
+  let reloadTimer: number | undefined;
   listenStorageReload(() => {
     if (reloadTimer) window.clearTimeout(reloadTimer);
     reloadTimer = window.setTimeout(() => void load(), 50);
