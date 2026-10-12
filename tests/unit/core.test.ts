@@ -30,9 +30,11 @@ import {
   createEmptyDatabase,
   SCHEMA_VERSION,
   UNDO_TTL_MS,
+  type Database,
   type SavedTab,
   type SaveScope,
   type Settings,
+  type RestoreMode,
 } from "../../src/types.js";
 import {
   LibraryStore,
@@ -53,19 +55,136 @@ import {
   handleRequest,
 } from "../../src/browser/library.js";
 
-function entry(partial: Partial<SavedTab> & { url: string }): SavedTab {
+function entry(
+  arg: string | (Partial<SavedTab> & { url: string }),
+  maybeUrl?: string,
+): SavedTab {
+  if (typeof arg === "string") {
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      id: arg,
+      url: maybeUrl ?? `https://${arg}.test/`,
+      title: arg,
+      favicon: null,
+      savedAt: 1,
+      source: { windowId: 1, index: 0, pinned: false },
+      group: "",
+      tags: [],
+      status: "saved",
+    };
+  }
   return {
     schemaVersion: SCHEMA_VERSION,
-    id: partial.id ?? "id1",
-    url: partial.url,
-    title: partial.title ?? "T",
-    favicon: partial.favicon ?? null,
-    savedAt: partial.savedAt ?? 1,
-    source: partial.source ?? { windowId: 1, index: 0, pinned: false },
-    group: partial.group ?? "",
-    tags: partial.tags ?? [],
+    id: arg.id ?? "id1",
+    url: arg.url,
+    title: arg.title ?? "T",
+    favicon: arg.favicon ?? null,
+    savedAt: arg.savedAt ?? 1,
+    source: arg.source ?? { windowId: 1, index: 0, pinned: false },
+    group: arg.group ?? "",
+    tags: arg.tags ?? [],
     status: "saved",
   };
+}
+
+const ready = (entries: SavedTab[] = []): Database => ({
+  ...createEmptyDatabase(),
+  entries,
+  settings: {
+    ...createEmptyDatabase().settings,
+    onboardingComplete: true,
+    unsavedHintAcknowledged: true,
+  },
+});
+
+const tab = (id: number, url: string) => ({
+  id,
+  url,
+  title: String(id),
+  windowId: 1,
+  index: id - 1,
+  pinned: false,
+  active: id === 1,
+  audible: false,
+});
+
+function mock(
+  initial: Array<{
+    id: number;
+    url: string;
+    title?: string;
+    windowId?: number;
+    index?: number;
+    pinned?: boolean;
+    active?: boolean;
+    audible?: boolean;
+  }> = [],
+) {
+  let tabs = structuredClone(initial);
+  const created: Array<{
+    id: number;
+    url?: string;
+    windowId?: number;
+    active?: boolean;
+  }> = [];
+  const removed: number[] = [];
+  const session: Record<string, unknown> = {};
+  vi.stubGlobal("chrome", {
+    runtime: {
+      id: "test",
+      getURL: (p: string) => `chrome-extension://test/${p}`,
+    },
+    tabs: {
+      get: vi.fn(async (id: number) => {
+        const t = tabs.find((x) => x.id === id);
+        if (!t) throw new Error("Missing tab");
+        return structuredClone(t);
+      }),
+      query: vi.fn(async (q: { windowId?: number; active?: boolean }) =>
+        structuredClone(
+          tabs.filter(
+            (t) =>
+              (q.windowId == null || t.windowId === q.windowId) &&
+              (!q.active || t.active),
+          ),
+        ),
+      ),
+      create: vi.fn(
+        async (opts: { url?: string; windowId?: number; active?: boolean }) => {
+          const t = {
+            id: 100 + created.length,
+            url: opts.url ?? "",
+            ...opts,
+          };
+          created.push(t);
+          tabs.push(t);
+          return t;
+        },
+      ),
+      remove: vi.fn(async (ids: number | number[]) => {
+        const arr = Array.isArray(ids) ? ids : [ids];
+        removed.push(...arr);
+        tabs = tabs.filter((t) => !arr.includes(t.id));
+      }),
+    },
+    storage: {
+      session: {
+        set: vi.fn(async (x: Record<string, unknown>) =>
+          Object.assign(session, structuredClone(x)),
+        ),
+        get: vi.fn(async () => structuredClone(session)),
+        remove: vi.fn(async (key: string | string[]) => {
+          for (const k of Array.isArray(key) ? key : [key]) delete session[k];
+        }),
+      },
+    },
+    action: {
+      setBadgeText: vi.fn(async () => {}),
+      setBadgeBackgroundColor: vi.fn(async () => {}),
+      setIcon: vi.fn(async () => {}),
+    },
+  });
+  return { created, removed, session, tabs: () => tabs };
 }
 
 describe("scope selection", () => {
@@ -1218,6 +1337,320 @@ describe("Round 3 formal data-layer & runtime regressions (R301–R308)", () => 
       );
     }
 
+    setStoreForTests(null);
+  });
+});
+
+describe("Round 4 formal regressions (R401–R408)", () => {
+  it("R401: constructor entry id opens its URL before removal in restore", async () => {
+    const base = memoryDriver({
+      tabfold_database: ready([entry("constructor", "https://valuable.test/")]),
+    });
+    setStoreForTests(new LibraryStore(base));
+    const b = mock();
+    const response = await restoreEntries(["constructor"]);
+    const raw = (await base.get(["tabfold_database"]))
+      .tabfold_database as Database;
+    expect(b.created).toHaveLength(1);
+    expect(b.created[0]?.url).toBe("https://valuable.test/");
+    expect(raw.entries).toHaveLength(0);
+    expect(response.opened).toBe(1);
+    setStoreForTests(null);
+  });
+
+  it("R401: __proto__ entry id opens its URL before Undo removes it", async () => {
+    const db = ready([entry("__proto__", "https://undo-valuable.test/")]);
+    db.undo = { ids: ["__proto__"], expiresAt: Date.now() + 10000 };
+    const base = memoryDriver({ tabfold_database: db });
+    setStoreForTests(new LibraryStore(base));
+    const b = mock();
+    const response = await undoLastSave();
+    const raw = (await base.get(["tabfold_database"]))
+      .tabfold_database as Database;
+    expect(b.created).toHaveLength(1);
+    expect(b.created[0]?.url).toBe("https://undo-valuable.test/");
+    expect(raw.entries).toHaveLength(0);
+    expect(response.ok).toBe(true);
+    setStoreForTests(null);
+  });
+
+  it("R402: malformed persisted metadata does not pass read-back or close source tab", async () => {
+    const base = memoryDriver({ tabfold_database: ready() });
+    const driver = {
+      ...base,
+      set: async (items: Record<string, unknown>) => {
+        const copy = structuredClone(items) as Record<string, unknown>;
+        const db = copy.tabfold_database as Record<string, unknown> | undefined;
+        if (db && Array.isArray(db.entries) && db.entries.length) {
+          (db.stats as Record<string, unknown>).totalSaved = "1";
+          (db.stats as Record<string, unknown>).totalClosed = String(
+            (db.stats as Record<string, unknown>).totalClosed,
+          );
+          (db.settings as Record<string, unknown>).theme = "INVALID";
+          if (db.undo) (db.undo as { ids: unknown[] }).ids.push(123);
+          delete (db.entries[0] as Record<string, unknown>).group;
+          delete (db.entries[0] as Record<string, unknown>).tags;
+        }
+        return base.set(copy);
+      },
+    };
+    setStoreForTests(new LibraryStore(driver));
+    const b = mock([
+      tab(1, "https://source.test/"),
+      tab(2, "chrome://settings"),
+    ]);
+    const response = await saveTabs({ scope: "current", tabId: 1 });
+    expect(b.removed).toHaveLength(0);
+    expect(response.closed).toBe(0);
+    setStoreForTests(null);
+  });
+
+  it("R403: unsaved acknowledgement alone does not authorize audio tab that becomes audible before close", async () => {
+    setStoreForTests(
+      new LibraryStore(
+        memoryDriver({ tabfold_database: createEmptyDatabase() }),
+      ),
+    );
+    const b = mock([
+      tab(1, "https://starts-audio.test/"),
+      tab(2, "chrome://settings"),
+    ]);
+    const original = chrome.tabs.get;
+    let reads = 0;
+    chrome.tabs.get = vi.fn(async (id: number) => {
+      const t = await original(id);
+      if (id === 1 && ++reads >= 3) t.audible = true;
+      return t;
+    });
+    const initial = await saveTabs({ scope: "current", tabId: 1 });
+    const response = await saveTabs({
+      scope: "current",
+      ...(initial.confirmToken ? { confirmToken: initial.confirmToken } : {}),
+      confirmedUnsaved: true,
+    });
+    expect(b.removed).toHaveLength(0);
+    expect(response.closed).toBe(0);
+    setStoreForTests(null);
+  });
+
+  it("R404: save read-back failure leaves unclosed tab out of undo", async () => {
+    const base = memoryDriver({ tabfold_database: ready() });
+    let failNext = false;
+    let readFailureUsed = false;
+    const driver = {
+      ...base,
+      set: async (x: Record<string, unknown>) => {
+        await base.set(x);
+        const db = x.tabfold_database as Database | undefined;
+        if (!readFailureUsed && db?.entries?.length) failNext = true;
+      },
+      get: async (keys: string[]) => {
+        if (failNext) {
+          failNext = false;
+          readFailureUsed = true;
+          throw new Error("One read-back failure");
+        }
+        return base.get(keys);
+      },
+    };
+    setStoreForTests(new LibraryStore(driver));
+    const b = mock([
+      tab(1, "https://original.test/"),
+      tab(2, "chrome://settings"),
+    ]);
+    await saveTabs({ scope: "current", tabId: 1 });
+    const persisted = (await base.get(["tabfold_database"]))
+      .tabfold_database as Database;
+    const undo = await undoLastSave();
+    expect(b.created).toHaveLength(0);
+    expect(b.tabs().some((t) => t.id === 1)).toBe(true);
+    expect(persisted.undo).toBeNull();
+    expect(undo.ok).toBe(false);
+    setStoreForTests(null);
+  });
+
+  it("R404: partial-close Undo opens only the source actually closed", async () => {
+    const base = memoryDriver({ tabfold_database: ready() });
+    let fail = true;
+    const driver = {
+      ...base,
+      set: async (x: Record<string, unknown>) => {
+        const db = x.tabfold_database as Database | undefined;
+        if (fail && db && db.stats && db.stats.totalClosed > 0)
+          throw new Error("Postclose write failed");
+        return base.set(x);
+      },
+    };
+    setStoreForTests(new LibraryStore(driver));
+    const b = mock([
+      tab(1, "https://first.test/"),
+      tab(2, "https://second.test/"),
+      tab(3, "chrome://settings"),
+    ]);
+    const remove = chrome.tabs.remove;
+    chrome.tabs.remove = vi.fn(async (ids: number | number[]) => {
+      const arr = Array.isArray(ids) ? ids : [ids];
+      await remove([arr[0]!]);
+      throw new Error("Partial remove failure");
+    }) as unknown as typeof chrome.tabs.remove;
+    await saveTabs({ scope: "window", tabId: 1 });
+    fail = false;
+    const undo = await undoLastSave();
+    expect(b.created).toHaveLength(1);
+    expect(b.created[0]?.url).toBe("https://first.test/");
+    expect(b.tabs().some((t) => t.id === 2)).toBe(true);
+    expect(undo.ok).toBe(true);
+    setStoreForTests(null);
+  });
+
+  it("R405: backup restore read failure after write preserves exact original database", async () => {
+    const original = ready([entry("original")]);
+    const backup = ready([entry("backup")]);
+    const base = memoryDriver({
+      tabfold_database: original,
+      tabfold_backups: [
+        { id: "backup", createdAt: 1, reason: "test", database: backup },
+      ],
+    });
+    let rejectNextGet = false;
+    const driver = {
+      ...base,
+      set: async (items: Record<string, unknown>) => {
+        await base.set(items);
+        const db = items.tabfold_database as Database | undefined;
+        if (db?.entries?.[0]?.id === "backup") rejectNextGet = true;
+      },
+      get: async (keys: string[]) => {
+        if (rejectNextGet) {
+          rejectNextGet = false;
+          throw new Error("Injected one read failure after restore write");
+        }
+        return base.get(keys);
+      },
+    };
+    let error: string | null = null;
+    try {
+      await new LibraryStore(driver).restoreBackup("backup");
+    } catch (e) {
+      error = String(e);
+    }
+    const raw = (await base.get(["tabfold_database"])).tabfold_database;
+    expect(error).toContain("Injected one read failure after restore write");
+    expect(JSON.stringify(raw)).toBe(JSON.stringify(original));
+  });
+
+  it("R406: both distinct damaged payloads remain exportable in salvage", async () => {
+    const damagedA = {
+      schemaVersion: 2,
+      entries: null,
+      uniqueRaw: "ONLY-A",
+    };
+    const damagedB = {
+      schemaVersion: 2,
+      entries: null,
+      uniqueRaw: "ONLY-B",
+    };
+    const base = memoryDriver({
+      tabfold_database: damagedA,
+      tabfold_backups: [
+        { id: "backup", createdAt: 1, reason: "test", database: ready() },
+      ],
+    });
+    const store = new LibraryStore(base);
+    await store.restoreBackup("backup");
+    await base.set({ tabfold_database: damagedB });
+    await store.restoreBackup("backup");
+    const raw = await store.exportRaw();
+    expect(raw).toContain("ONLY-A");
+    expect(raw).toContain("ONLY-B");
+  });
+
+  it("R407: rejected journal persistence and DB writes do not cause duplicate opens on retry", async () => {
+    const base = memoryDriver({ tabfold_database: ready([entry("retry")]) });
+    let fail = true;
+    const driver = {
+      ...base,
+      set: async (x: Record<string, unknown>) => {
+        if (fail && x.tabfold_database) throw new Error("DB unavailable");
+        return base.set(x);
+      },
+    };
+    setStoreForTests(new LibraryStore(driver));
+    const b = mock();
+    chrome.storage.session.set = vi.fn(async () => {
+      throw new Error("Session unavailable");
+    });
+    await restoreEntries(["retry"]);
+    fail = false;
+    await restoreEntries(["retry"]);
+    expect(b.created.length).toBeLessThanOrEqual(1);
+    setStoreForTests(null);
+  });
+
+  it("R407: stale journal reopens missing tab instead of losing URL", async () => {
+    const base = memoryDriver({ tabfold_database: ready([entry("retry")]) });
+    let fail = true;
+    const driver = {
+      ...base,
+      set: async (x: Record<string, unknown>) => {
+        if (fail && x.tabfold_database) throw new Error("DB unavailable");
+        return base.set(x);
+      },
+    };
+    setStoreForTests(new LibraryStore(driver));
+    const b = mock();
+    await restoreEntries(["retry"]);
+    expect(b.created[0]).toBeDefined();
+    await chrome.tabs.remove([b.created[0]!.id]);
+    fail = false;
+    await restoreEntries(["retry"]);
+    const raw = (await base.get(["tabfold_database"]))
+      .tabfold_database as Database;
+    const dataLost = b.tabs().length === 0 && raw.entries.length === 0;
+    expect(dataLost).toBe(false);
+    expect(b.tabs().length).toBe(1);
+    setStoreForTests(null);
+  });
+
+  it("R408: malformed edit input is rejected before changing persisted database", async () => {
+    const original = ready([entry("edited")]);
+    const base = memoryDriver({ tabfold_database: original });
+    setStoreForTests(new LibraryStore(base));
+    mock();
+    const response = await handleRequest({
+      type: "edit-entry",
+      id: "edited",
+      group: { bad: "object" } as unknown as string,
+      tags: [],
+    });
+    const raw = (await base.get(["tabfold_database"]))
+      .tabfold_database as Database;
+    const state = await handleRequest({ type: "get-state" });
+    expect(response.ok).toBe(false);
+    expect(JSON.stringify(raw)).toBe(JSON.stringify(original));
+    if (state.ok && state.data && typeof state.data === "object") {
+      expect((state.data as { corrupt?: boolean }).corrupt).toBe(false);
+    } else {
+      expect.unreachable();
+    }
+    setStoreForTests(null);
+  });
+
+  it("R408: unknown restore mode is rejected before opening or deleting any entries", async () => {
+    const rows = Array.from({ length: 16 }, (_, i) => entry("e" + i));
+    const base = memoryDriver({ tabfold_database: ready(rows) });
+    setStoreForTests(new LibraryStore(base));
+    const b = mock();
+    const response = await handleRequest({
+      type: "restore",
+      ids: rows.map((x) => x.id),
+      mode: "invalid-mode" as unknown as RestoreMode,
+    });
+    const raw = (await base.get(["tabfold_database"]))
+      .tabfold_database as Database;
+    expect(response.ok).toBe(false);
+    expect(b.created).toHaveLength(0);
+    expect(raw.entries).toHaveLength(16);
     setStoreForTests(null);
   });
 });

@@ -28,7 +28,7 @@ async function launchExtension(
   userDataDir: string,
   dist: string,
   opts?: { resetProfile?: boolean },
-): Promise<{ context: BrowserContext; extensionId: string }> {
+): Promise<{ context: BrowserContext; extensionId: string; safeDir: string }> {
   const safeDir = userDataDir.includes(" ")
     ? fs.mkdtempSync(path.join(os.tmpdir(), path.basename(userDataDir) + "-"))
     : userDataDir;
@@ -36,22 +36,29 @@ async function launchExtension(
     fs.rmSync(safeDir, { recursive: true, force: true });
   }
   fs.mkdirSync(safeDir, { recursive: true });
-  const context = await chromium.launchPersistentContext(safeDir, {
-    headless: true,
-    channel: "chromium",
-    args: [
-      `--disable-extensions-except=${dist}`,
-      `--load-extension=${dist}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
-  let sw = context.serviceWorkers()[0];
-  if (!sw)
-    sw = await context.waitForEvent("serviceworker", { timeout: 30_000 });
-  const extensionId = sw.url().split("/")[2] ?? "";
-  expect(extensionId.length).toBeGreaterThan(8);
-  return { context, extensionId };
+  let context: BrowserContext | null = null;
+  try {
+    context = await chromium.launchPersistentContext(safeDir, {
+      headless: true,
+      channel: "chromium",
+      args: [
+        `--disable-extensions-except=${dist}`,
+        `--load-extension=${dist}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--autoplay-policy=no-user-gesture-required",
+      ],
+    });
+    let sw = context.serviceWorkers()[0];
+    if (!sw)
+      sw = await context.waitForEvent("serviceworker", { timeout: 30_000 });
+    const extensionId = sw.url().split("/")[2] ?? "";
+    expect(extensionId.length).toBeGreaterThan(8);
+    return { context, extensionId, safeDir };
+  } catch (err) {
+    if (context) await context.close().catch(() => {});
+    throw err;
+  }
 }
 
 function startFixtureServer(): Promise<{
@@ -152,10 +159,12 @@ test("main flow: real UI and API save, close, restore, undo, demo, search, expor
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-main");
   const fixture = await startFixtureServer();
   let context: BrowserContext | null = null;
+  let safeDir: string = userDataDir;
 
   try {
     const launched = await launchExtension(userDataDir, dist);
     context = launched.context;
+    safeDir = launched.safeDir;
     const extensionId = launched.extensionId;
 
     const ext = await context.newPage();
@@ -312,6 +321,8 @@ test("main flow: real UI and API save, close, restore, undo, demo, search, expor
   } finally {
     if (context) await context.close().catch(() => {});
     await fixture.close().catch(() => {});
+    fs.rmSync(safeDir, { recursive: true, force: true });
+    fs.rmSync(dist, { recursive: true, force: true });
   }
 });
 
@@ -319,162 +330,169 @@ test("same profile restart + worker stop/wake with CDP and raw DB equality", asy
   const dist = prepareDist();
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-persist");
   let originalEntries: Array<{ id: string; url: string; title: string }> = [];
+  let safeDir: string = userDataDir;
 
-  // Stage 1: launch profile, populate demo data, stop worker via CDP, wake worker
-  {
-    let context: BrowserContext | null = null;
-    try {
-      const launched = await launchExtension(userDataDir, dist, {
-        resetProfile: true,
-      });
-      context = launched.context;
-      const extensionId = launched.extensionId;
+  try {
+    // Stage 1: launch profile, populate demo data, stop worker via CDP, wake worker
+    {
+      let context: BrowserContext | null = null;
+      try {
+        const launched = await launchExtension(userDataDir, dist, {
+          resetProfile: true,
+        });
+        context = launched.context;
+        safeDir = launched.safeDir;
+        const extensionId = launched.extensionId;
 
-      const page = await context.newPage();
-      await page.goto(`chrome-extension://${extensionId}/list.html`, {
-        waitUntil: "domcontentloaded",
-      });
-      await msg(page, {
-        type: "patch-settings",
-        patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
-      });
-      expect((await msg<{ ok: boolean }>(page, { type: "load-demo" })).ok).toBe(
-        true,
-      );
+        const page = await context.newPage();
+        await page.goto(`chrome-extension://${extensionId}/list.html`, {
+          waitUntil: "domcontentloaded",
+        });
+        await msg(page, {
+          type: "patch-settings",
+          patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
+        });
+        expect(
+          (await msg<{ ok: boolean }>(page, { type: "load-demo" })).ok,
+        ).toBe(true);
 
-      const state = await msg<{
-        data: {
-          database: {
-            entries: Array<{ id: string; url: string; title: string }>;
+        const state = await msg<{
+          data: {
+            database: {
+              entries: Array<{ id: string; url: string; title: string }>;
+            };
           };
-        };
-      }>(page, {
-        type: "get-state",
-      });
-      originalEntries = state.data.database.entries;
-      expect(originalEntries.length).toBeGreaterThan(2);
+        }>(page, {
+          type: "get-state",
+        });
+        originalEntries = state.data.database.entries;
+        expect(originalEntries.length).toBeGreaterThan(2);
 
-      // Inspect full raw DB before worker stop
-      const beforeRaw = await page.evaluate(async () => {
-        const res = await chrome.storage.local.get("tabfold_database");
-        return res.tabfold_database;
-      });
+        // Inspect full raw DB before worker stop
+        const beforeRaw = await page.evaluate(async () => {
+          const res = await chrome.storage.local.get("tabfold_database");
+          return res.tabfold_database;
+        });
 
-      // CDP service worker stop verification (R318)
-      interface CdpWorkerVersion {
-        versionId: string;
-        scriptURL?: string;
-        runningStatus?: string;
+        // CDP service worker stop verification (R318)
+        interface CdpWorkerVersion {
+          versionId: string;
+          scriptURL?: string;
+          runningStatus?: string;
+        }
+        const client = await context.newCDPSession(page);
+        const versionEvents: CdpWorkerVersion[] = [];
+        client.on(
+          "ServiceWorker.workerVersionUpdated",
+          (e: { versions?: CdpWorkerVersion[] }) => {
+            if (e.versions) versionEvents.push(...e.versions);
+          },
+        );
+        await client.send("ServiceWorker.enable");
+        await page.waitForTimeout(100);
+
+        const swInfo = versionEvents
+          .filter((v: CdpWorkerVersion) =>
+            Boolean(
+              v.scriptURL &&
+              v.scriptURL.includes(extensionId) &&
+              v.scriptURL.includes("service-worker.js"),
+            ),
+          )
+          .at(-1);
+        expect(swInfo).toBeTruthy();
+
+        let sw = context
+          .serviceWorkers()
+          .find((w) => w.url().includes(extensionId))!;
+        await sw.evaluate(() => {
+          const g = globalThis as typeof globalThis & {
+            __testWorkerNonce?: string;
+          };
+          g.__testWorkerNonce = "active-nonce-r318";
+        });
+
+        await client.send("ServiceWorker.stopWorker", {
+          versionId: swInfo!.versionId,
+        });
+        await page.waitForTimeout(250);
+
+        const stoppedEvent = versionEvents.some(
+          (v: CdpWorkerVersion) =>
+            v.versionId === swInfo!.versionId && v.runningStatus === "stopped",
+        );
+        expect(stoppedEvent).toBe(true);
+
+        // Wake the worker by sending runtime message
+        const woken = await msg<{
+          ok: boolean;
+          data: {
+            database: {
+              entries: Array<{ id: string; url: string; title: string }>;
+            };
+          };
+        }>(page, {
+          type: "get-state",
+        });
+        expect(woken.ok).toBe(true);
+
+        // Confirm fresh execution realm: nonce reset to null
+        sw =
+          context.serviceWorkers().find((w) => w.url().includes(extensionId)) ??
+          sw;
+        const afterNonce = await sw.evaluate(() => {
+          const g = globalThis as typeof globalThis & {
+            __testWorkerNonce?: string;
+          };
+          return g.__testWorkerNonce ?? null;
+        });
+        expect(afterNonce).toBeNull();
+
+        // Assert full raw DB equality
+        const afterRaw = await page.evaluate(async () => {
+          const res = await chrome.storage.local.get("tabfold_database");
+          return res.tabfold_database;
+        });
+        expect(afterRaw).toEqual(beforeRaw);
+      } finally {
+        if (context) await context.close().catch(() => {});
       }
-      const client = await context.newCDPSession(page);
-      const versionEvents: CdpWorkerVersion[] = [];
-      client.on(
-        "ServiceWorker.workerVersionUpdated",
-        (e: { versions?: CdpWorkerVersion[] }) => {
-          if (e.versions) versionEvents.push(...e.versions);
-        },
-      );
-      await client.send("ServiceWorker.enable");
-      await page.waitForTimeout(100);
-
-      const swInfo = versionEvents
-        .filter((v: CdpWorkerVersion) =>
-          Boolean(
-            v.scriptURL &&
-            v.scriptURL.includes(extensionId) &&
-            v.scriptURL.includes("service-worker.js"),
-          ),
-        )
-        .at(-1);
-      expect(swInfo).toBeTruthy();
-
-      let sw = context
-        .serviceWorkers()
-        .find((w) => w.url().includes(extensionId))!;
-      await sw.evaluate(() => {
-        const g = globalThis as typeof globalThis & {
-          __testWorkerNonce?: string;
-        };
-        g.__testWorkerNonce = "active-nonce-r318";
-      });
-
-      await client.send("ServiceWorker.stopWorker", {
-        versionId: swInfo!.versionId,
-      });
-      await page.waitForTimeout(250);
-
-      const stoppedEvent = versionEvents.some(
-        (v: CdpWorkerVersion) =>
-          v.versionId === swInfo!.versionId && v.runningStatus === "stopped",
-      );
-      expect(stoppedEvent).toBe(true);
-
-      // Wake the worker by sending runtime message
-      const woken = await msg<{
-        ok: boolean;
-        data: {
-          database: {
-            entries: Array<{ id: string; url: string; title: string }>;
-          };
-        };
-      }>(page, {
-        type: "get-state",
-      });
-      expect(woken.ok).toBe(true);
-
-      // Confirm fresh execution realm: nonce reset to null
-      sw =
-        context.serviceWorkers().find((w) => w.url().includes(extensionId)) ??
-        sw;
-      const afterNonce = await sw.evaluate(() => {
-        const g = globalThis as typeof globalThis & {
-          __testWorkerNonce?: string;
-        };
-        return g.__testWorkerNonce ?? null;
-      });
-      expect(afterNonce).toBeNull();
-
-      // Assert full raw DB equality
-      const afterRaw = await page.evaluate(async () => {
-        const res = await chrome.storage.local.get("tabfold_database");
-        return res.tabfold_database;
-      });
-      expect(afterRaw).toEqual(beforeRaw);
-    } finally {
-      if (context) await context.close().catch(() => {});
     }
-  }
 
-  // Stage 2: relaunch same profile without resetting and verify database persistence
-  {
-    let context: BrowserContext | null = null;
-    try {
-      const launched = await launchExtension(userDataDir, dist, {
-        resetProfile: false,
-      });
-      context = launched.context;
-      const extensionId = launched.extensionId;
+    // Stage 2: relaunch same profile without resetting and verify database persistence
+    {
+      let context: BrowserContext | null = null;
+      try {
+        const launched = await launchExtension(userDataDir, dist, {
+          resetProfile: false,
+        });
+        context = launched.context;
+        const extensionId = launched.extensionId;
 
-      const page = await context.newPage();
-      await page.goto(`chrome-extension://${extensionId}/list.html`, {
-        waitUntil: "domcontentloaded",
-      });
-      const state = await msg<{
-        data: {
-          database: {
-            entries: Array<{ id: string; url: string; title: string }>;
+        const page = await context.newPage();
+        await page.goto(`chrome-extension://${extensionId}/list.html`, {
+          waitUntil: "domcontentloaded",
+        });
+        const state = await msg<{
+          data: {
+            database: {
+              entries: Array<{ id: string; url: string; title: string }>;
+            };
           };
-        };
-      }>(page, {
-        type: "get-state",
-      });
-      expect(state.data.database.entries.length).toBe(originalEntries.length);
-      expect(state.data.database.entries.map((e) => e.url)).toEqual(
-        originalEntries.map((e) => e.url),
-      );
-    } finally {
-      if (context) await context.close().catch(() => {});
+        }>(page, {
+          type: "get-state",
+        });
+        expect(state.data.database.entries.length).toBe(originalEntries.length);
+        expect(state.data.database.entries.map((e) => e.url)).toEqual(
+          originalEntries.map((e) => e.url),
+        );
+      } finally {
+        if (context) await context.close().catch(() => {});
+      }
     }
+  } finally {
+    fs.rmSync(safeDir, { recursive: true, force: true });
+    fs.rmSync(dist, { recursive: true, force: true });
   }
 });
 
@@ -482,10 +500,12 @@ test("popup UI: skip onboarding, keyboard focus, options persistence, and reduce
   const dist = prepareDist();
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-ui");
   let context: BrowserContext | null = null;
+  let safeDir: string = userDataDir;
 
   try {
     const launched = await launchExtension(userDataDir, dist);
     context = launched.context;
+    safeDir = launched.safeDir;
     const extensionId = launched.extensionId;
 
     const popup = await context.newPage();
@@ -547,6 +567,8 @@ test("popup UI: skip onboarding, keyboard focus, options persistence, and reduce
     await options.close();
   } finally {
     if (context) await context.close().catch(() => {});
+    fs.rmSync(safeDir, { recursive: true, force: true });
+    fs.rmSync(dist, { recursive: true, force: true });
   }
 });
 
@@ -555,10 +577,12 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
   const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-special");
   const fixture = await startFixtureServer();
   let context: BrowserContext | null = null;
+  let safeDir: string = userDataDir;
 
   try {
     const launched = await launchExtension(userDataDir, dist);
     context = launched.context;
+    safeDir = launched.safeDir;
     const extensionId = launched.extensionId;
 
     const ext = await context.newPage();
@@ -633,7 +657,62 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
     expect(validConfirm.data.saved).toBe(1);
     expect(validConfirm.data.closed).toBe(1);
 
-    // 3. Duplicate tab skipping (R207/R215)
+    // 3. Audible tab with real audio fixture (R416)
+    const audioTab = await openTabViaExtension(
+      ext,
+      `http://127.0.0.1:${fixture.port}/audio`,
+    );
+    await ext.waitForTimeout(400);
+
+    const firstAudioSave = await msg<{
+      ok: boolean;
+      data: {
+        saved: number;
+        needsAudioAck?: boolean;
+        confirmToken?: string;
+      };
+    }>(ext, {
+      type: "save",
+      tabIds: [audioTab],
+    });
+    expect(firstAudioSave.ok).toBe(true);
+    if (firstAudioSave.data.needsAudioAck) {
+      expect(firstAudioSave.data.saved).toBe(0);
+      expect(typeof firstAudioSave.data.confirmToken).toBe("string");
+
+      // Attempt bypass with only confirmedUnsaved: must not close audio tab
+      const bypassAudio = await msg<{
+        ok: boolean;
+        data: { saved: number; closed: number };
+      }>(ext, {
+        type: "save",
+        tabIds: [audioTab],
+        confirmedUnsaved: true,
+        confirmToken: firstAudioSave.data.confirmToken,
+      });
+      expect(bypassAudio.data.saved).toBe(0);
+
+      // Confirm with confirmedAudio: successfully closes and saves audio tab
+      const confirmAudio = await msg<{
+        ok: boolean;
+        data: { saved: number; closed: number };
+      }>(ext, {
+        type: "save",
+        tabIds: [audioTab],
+        confirmedAudio: true,
+        confirmToken: firstAudioSave.data.confirmToken,
+      });
+      expect(confirmAudio.ok).toBe(true);
+      expect(confirmAudio.data.saved).toBe(1);
+      expect(confirmAudio.data.closed).toBe(1);
+    } else {
+      await ext.evaluate(
+        async (id) => chrome.tabs.remove(id).catch(() => {}),
+        audioTab,
+      );
+    }
+
+    // 4. Duplicate tab skipping (R207/R215)
     const dupTab = await openTabViaExtension(
       ext,
       `http://127.0.0.1:${fixture.port}/special`,
@@ -651,7 +730,7 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
     expect(dupSave.data.skipped.length).toBe(1);
     expect(dupSave.data.skipped[0]?.reason).toContain("Already saved");
 
-    // 4. Pinned tab skipping
+    // 5. Pinned tab skipping
     const pinnedTab = await openTabViaExtension(
       ext,
       `http://127.0.0.1:${fixture.port}/pinned`,
@@ -670,7 +749,7 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
     expect(pinnedSave.data.skipped.length).toBe(1);
     expect(pinnedSave.data.skipped[0]?.reason).toContain("Pinned");
 
-    // 5. Window preservation when closing the last tab in a window
+    // 6. Window preservation when closing the last tab in a window
     const newWinId = await ext.evaluate(async (url) => {
       const win = await chrome.windows.create({ url });
       return win.id!;
@@ -710,7 +789,7 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
       newWinId,
     );
 
-    // 6. Backup snapshot creation via operation and restore roundtrip
+    // 7. Backup snapshot creation via operation and restore roundtrip
     const demoRes = await msg<{ ok: boolean }>(ext, { type: "load-demo" });
     expect(demoRes.ok).toBe(true);
 
@@ -731,5 +810,156 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
   } finally {
     if (context) await context.close().catch(() => {});
     await fixture.close().catch(() => {});
+    fs.rmSync(safeDir, { recursive: true, force: true });
+    fs.rmSync(dist, { recursive: true, force: true });
+  }
+});
+
+test("prototype id safety: constructor and __proto__ roundtrip import, restore, and undo in real browser", async () => {
+  const dist = prepareDist();
+  const userDataDir = path.join(os.tmpdir(), "tabfold-userdata-prototype");
+  const fixture = await startFixtureServer();
+  let context: BrowserContext | null = null;
+  let safeDir: string = userDataDir;
+
+  try {
+    const launched = await launchExtension(userDataDir, dist);
+    context = launched.context;
+    safeDir = launched.safeDir;
+    const extensionId = launched.extensionId;
+
+    const page = await context.newPage();
+    await page.goto(`chrome-extension://${extensionId}/list.html`, {
+      waitUntil: "domcontentloaded",
+    });
+    await msg(page, {
+      type: "patch-settings",
+      patch: { onboardingComplete: true, unsavedHintAcknowledged: true },
+    });
+
+    const entriesToImport = [
+      {
+        schemaVersion: 2,
+        id: "constructor",
+        url: `http://127.0.0.1:${fixture.port}/constructor-page`,
+        title: "Constructor Tab",
+        favicon: null,
+        savedAt: Date.now() - 1000,
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      },
+      {
+        schemaVersion: 2,
+        id: "__proto__",
+        url: `http://127.0.0.1:${fixture.port}/proto-page`,
+        title: "Proto Tab",
+        favicon: null,
+        savedAt: Date.now() - 500,
+        source: { windowId: 1, index: 1, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      },
+    ];
+
+    const importRes = await msg<{
+      ok: boolean;
+      data: { summary: { added: number } };
+    }>(page, {
+      type: "import-json",
+      text: JSON.stringify({
+        format: "tabfold-json",
+        schemaVersion: 2,
+        entries: entriesToImport,
+      }),
+    });
+    expect(importRes.ok).toBe(true);
+    expect(importRes.data.summary.added).toBe(2);
+
+    // Verify both entries exist in database
+    const state = await msg<{
+      ok: boolean;
+      data: { database: { entries: Array<{ id: string; url: string }> } };
+    }>(page, { type: "get-state" });
+    expect(state.data.database.entries).toHaveLength(2);
+    expect(state.data.database.entries.map((e) => e.id)).toEqual([
+      "constructor",
+      "__proto__",
+    ]);
+
+    // Restore "constructor" entry: must open its URL and remove entry with zero data loss
+    const restoreRes = await msg<{
+      ok: boolean;
+      data: { opened: number; closed: number };
+    }>(page, {
+      type: "restore",
+      ids: ["constructor"],
+    });
+    expect(restoreRes.ok).toBe(true);
+    expect(restoreRes.data.opened).toBe(1);
+
+    // Verify constructor tab was actually opened in browser
+    let constructorOpened = false;
+    for (let i = 0; i < 30; i++) {
+      const tabs = await page.evaluate(async () => {
+        const list = await chrome.tabs.query({});
+        return list.map(
+          (t) =>
+            (t as { pendingUrl?: string; url?: string }).pendingUrl ||
+            t.url ||
+            "",
+        );
+      });
+      if (tabs.some((u) => u.includes("/constructor-page"))) {
+        constructorOpened = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    expect(constructorOpened).toBe(true);
+
+    // Restore "__proto__" entry
+    const restoreProtoRes = await msg<{
+      ok: boolean;
+      data: { opened: number; closed: number };
+    }>(page, {
+      type: "restore",
+      ids: ["__proto__"],
+    });
+    expect(restoreProtoRes.ok).toBe(true);
+    expect(restoreProtoRes.data.opened).toBe(1);
+
+    let protoOpened = false;
+    for (let i = 0; i < 30; i++) {
+      const tabs = await page.evaluate(async () => {
+        const list = await chrome.tabs.query({});
+        return list.map(
+          (t) =>
+            (t as { pendingUrl?: string; url?: string }).pendingUrl ||
+            t.url ||
+            "",
+        );
+      });
+      if (tabs.some((u) => u.includes("/proto-page"))) {
+        protoOpened = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    expect(protoOpened).toBe(true);
+
+    // Verify database entries are now 0
+    const finalState = await msg<{
+      ok: boolean;
+      data: { database: { entries: Array<{ id: string }> } };
+    }>(page, { type: "get-state" });
+    expect(finalState.data.database.entries).toHaveLength(0);
+  } finally {
+    if (context) await context.close().catch(() => {});
+    await fixture.close().catch(() => {});
+    fs.rmSync(safeDir, { recursive: true, force: true });
+    fs.rmSync(dist, { recursive: true, force: true });
   }
 });
