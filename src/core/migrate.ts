@@ -50,9 +50,28 @@ export interface MigrateResult {
   warnings: string[];
 }
 
-function parseUndo(raw: unknown, now: number): UndoState | null {
-  if (!isRecord(raw)) return null;
-  if (!Array.isArray(raw.ids) || typeof raw.expiresAt !== "number") return null;
+function parseUndo(
+  raw: unknown,
+  now: number,
+  strictCurrent = false,
+): UndoState | null {
+  if (raw == null) return null;
+  if (!isRecord(raw)) {
+    if (strictCurrent) throw new CorruptDatabaseError("undo not object", raw);
+    return null;
+  }
+  if (!Array.isArray(raw.ids) || typeof raw.expiresAt !== "number") {
+    if (strictCurrent)
+      throw new CorruptDatabaseError("invalid undo structure", raw);
+    return null;
+  }
+  if (strictCurrent) {
+    for (const x of raw.ids) {
+      if (typeof x !== "string" || x.length === 0) {
+        throw new CorruptDatabaseError("undo ids contains non-string", raw);
+      }
+    }
+  }
   const ids = raw.ids.filter(
     (x): x is string => typeof x === "string" && x.length > 0,
   );
@@ -190,11 +209,15 @@ function migrateEntryStrict(
     ) {
       return { invalid: true, reason: "tags must be an array of strings" };
     }
+  } else if (opts.strictCurrent) {
+    return { invalid: true, reason: "missing tags" };
   }
   const tags = Array.isArray(raw.tags) ? raw.tags : [];
 
   if (raw.group !== undefined && typeof raw.group !== "string") {
     return { invalid: true, reason: "group must be a string" };
+  } else if (opts.strictCurrent && raw.group === undefined) {
+    return { invalid: true, reason: "missing group" };
   }
   const group = asString(raw.group, "");
 
@@ -214,8 +237,71 @@ function migrateEntryStrict(
   };
 }
 
-export function migrateSettings(raw: unknown): Settings {
+export function migrateSettings(raw: unknown, strictCurrent = false): Settings {
   if (!isRecord(raw)) return { ...DEFAULT_SETTINGS, whitelist: [] };
+  if (strictCurrent) {
+    if (
+      raw.theme !== undefined &&
+      raw.theme !== "light" &&
+      raw.theme !== "dark" &&
+      raw.theme !== "system"
+    ) {
+      throw new CorruptDatabaseError(
+        `invalid theme: ${String(raw.theme)}`,
+        raw,
+      );
+    }
+    if (
+      raw.defaultScope !== undefined &&
+      raw.defaultScope !== "current" &&
+      raw.defaultScope !== "others" &&
+      raw.defaultScope !== "window"
+    ) {
+      throw new CorruptDatabaseError(
+        `invalid defaultScope: ${String(raw.defaultScope)}`,
+        raw,
+      );
+    }
+    if (
+      raw.whitelist !== undefined &&
+      (!Array.isArray(raw.whitelist) ||
+        raw.whitelist.some((h) => typeof h !== "string"))
+    ) {
+      throw new CorruptDatabaseError("whitelist must be string array", raw);
+    }
+    if (
+      raw.removeAfterRestore !== undefined &&
+      typeof raw.removeAfterRestore !== "boolean"
+    ) {
+      throw new CorruptDatabaseError("removeAfterRestore must be boolean", raw);
+    }
+    if (
+      raw.onboardingComplete !== undefined &&
+      typeof raw.onboardingComplete !== "boolean"
+    ) {
+      throw new CorruptDatabaseError("onboardingComplete must be boolean", raw);
+    }
+    if (
+      raw.unsavedHintAcknowledged !== undefined &&
+      typeof raw.unsavedHintAcknowledged !== "boolean"
+    ) {
+      throw new CorruptDatabaseError(
+        "unsavedHintAcknowledged must be boolean",
+        raw,
+      );
+    }
+    if (
+      raw.restoreBatchSize !== undefined &&
+      (typeof raw.restoreBatchSize !== "number" ||
+        !Number.isFinite(raw.restoreBatchSize) ||
+        raw.restoreBatchSize < 1)
+    ) {
+      throw new CorruptDatabaseError(
+        "restoreBatchSize must be number >= 1",
+        raw,
+      );
+    }
+  }
   const scope = raw.defaultScope;
   const defaultScope =
     scope === "current" || scope === "others" || scope === "window"
@@ -245,9 +331,28 @@ export function migrateSettings(raw: unknown): Settings {
   };
 }
 
-function migrateStats(raw: unknown, entryCount: number): Database["stats"] {
+function migrateStats(
+  raw: unknown,
+  entryCount: number,
+  strictCurrent = false,
+): Database["stats"] {
   if (!isRecord(raw)) {
     return { ...DEFAULT_STATS, totalSaved: entryCount };
+  }
+  if (strictCurrent) {
+    for (const key of [
+      "totalSaved",
+      "totalRestored",
+      "totalClosed",
+      "totalImported",
+    ] as const) {
+      if (raw[key] !== undefined) {
+        const v = raw[key];
+        if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+          throw new CorruptDatabaseError(`stats.${key} must be a number`, raw);
+        }
+      }
+    }
   }
   return {
     totalSaved: asNumber(raw.totalSaved, entryCount),
@@ -313,6 +418,7 @@ export function migrateDatabase(
   if (isV1) {
     const tabs = Array.isArray(raw.tabs) ? raw.tabs : [];
     const lenient: SavedTab[] = [];
+    const seenV1Ids = new Set<string>();
     for (let i = 0; i < tabs.length; i++) {
       const t = tabs[i];
       if (!isRecord(t))
@@ -323,7 +429,11 @@ export function migrateDatabase(
       }
       const title = asString(t.title, url);
       const savedAt = asNumber(t.savedAt, 0);
-      const id = asString(t.id).trim() || stableMigratedId(url, savedAt, title);
+      let id = asString(t.id).trim() || stableMigratedId(url, savedAt, title);
+      if (seenV1Ids.has(id)) {
+        id = `${id}_v1dup_${i}`;
+      }
+      seenV1Ids.add(id);
       const sourceRaw = isRecord(t.source) ? t.source : {};
       const source: SavedTab["source"] = {
         windowId: asNumber(sourceRaw.windowId, -1),
@@ -388,7 +498,8 @@ export function migrateDatabase(
     entries.push(r.entry);
   }
 
-  const undo = parseUndo(raw.undo, now);
+  const strictCurrent = opts.strictCurrent ?? version === SCHEMA_VERSION;
+  const undo = parseUndo(raw.undo, now, strictCurrent);
   if (isRecord(raw.undo) && !undo && Array.isArray(raw.undo.ids)) {
     warnings.push("undo expired or invalid — cleared");
   }
@@ -406,8 +517,8 @@ export function migrateDatabase(
       schemaVersion: SCHEMA_VERSION,
       revision: asNumber(raw.revision, 0),
       entries,
-      settings: migrateSettings(raw.settings),
-      stats: migrateStats(raw.stats, entries.length),
+      settings: migrateSettings(raw.settings, strictCurrent),
+      stats: migrateStats(raw.stats, entries.length, strictCurrent),
       undo,
     },
     didMigrate,

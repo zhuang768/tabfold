@@ -199,17 +199,41 @@ async function clearConfirm(): Promise<void> {
 const RESTORE_JOURNAL_KEY = "tabfold_restore_journal";
 const UNDO_JOURNAL_KEY = "tabfold_undo_journal";
 
+const inMemoryJournals: Record<string, Record<string, number>> = Object.create(
+  null,
+);
+
+function createCleanDict(): Record<string, number> {
+  return Object.create(null) as Record<string, number>;
+}
+
 async function getJournal(key: string): Promise<Record<string, number>> {
-  try {
-    if (typeof chrome === "undefined" || !chrome.storage?.session) return {};
-    const data = await chrome.storage.session.get(key);
-    const j = data?.[key];
-    return typeof j === "object" && j !== null
-      ? (j as Record<string, number>)
-      : {};
-  } catch {
-    return {};
+  const result = createCleanDict();
+  if (inMemoryJournals[key]) {
+    for (const id of Object.getOwnPropertyNames(inMemoryJournals[key])) {
+      const v = inMemoryJournals[key][id];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+        result[id] = v;
+      }
+    }
   }
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      const data = await chrome.storage.session.get(key);
+      const raw = data?.[key];
+      if (typeof raw === "object" && raw !== null) {
+        for (const id of Object.getOwnPropertyNames(raw)) {
+          const v = (raw as Record<string, unknown>)[id];
+          if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+            result[id] = v;
+          }
+        }
+      }
+    }
+  } catch {
+    // best effort session read
+  }
+  return result;
 }
 
 async function recordJournalEntry(
@@ -217,22 +241,63 @@ async function recordJournalEntry(
   id: string,
   tabId: number,
 ): Promise<void> {
+  if (!inMemoryJournals[key]) {
+    inMemoryJournals[key] = createCleanDict();
+  }
+  inMemoryJournals[key][id] = tabId;
   try {
     if (typeof chrome === "undefined" || !chrome.storage?.session) return;
     const current = await getJournal(key);
     current[id] = tabId;
-    await chrome.storage.session.set({ [key]: current });
+    const plain: Record<string, number> = {};
+    for (const k of Object.getOwnPropertyNames(current)) {
+      if (typeof current[k] === "number") {
+        plain[k] = current[k];
+      }
+    }
+    await chrome.storage.session.set({ [key]: plain });
   } catch {
-    // best effort
+    // in-memory journal retained
   }
 }
 
 async function clearJournal(key: string): Promise<void> {
+  delete inMemoryJournals[key];
   try {
     if (typeof chrome === "undefined" || !chrome.storage?.session) return;
     await chrome.storage.session.remove(key);
   } catch {
     // best effort
+  }
+}
+
+function getJournalTabId(
+  journal: Record<string, number>,
+  id: string,
+): number | null {
+  if (Object.prototype.hasOwnProperty.call(journal, id)) {
+    const v = journal[id];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+      return v;
+    }
+  }
+  return null;
+}
+
+async function verifyTabAlive(
+  tabId: number,
+  expectedUrl?: string,
+): Promise<boolean> {
+  if (typeof chrome === "undefined" || !chrome.tabs?.get) return false;
+  try {
+    const t = await chrome.tabs.get(tabId);
+    if (!t) return false;
+    if (expectedUrl && t.url && t.url !== "about:blank") {
+      return t.url === expectedUrl || t.pendingUrl === expectedUrl;
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -501,10 +566,7 @@ export async function saveTabs(options: {
           ...db.stats,
           totalSaved: db.stats.totalSaved + newEntries.length,
         },
-        undo: {
-          ids: newEntries.map((e) => e.id),
-          expiresAt: now + UNDO_TTL_MS,
-        },
+        undo: db.undo,
         settings: {
           ...db.settings,
           unsavedHintAcknowledged: true,
@@ -624,7 +686,8 @@ export async function saveTabs(options: {
           });
           continue;
         }
-        if (fresh.audible && !options.confirmedAudio && !bound) {
+        const audioConfirmed = Boolean(options.confirmedAudio && bound);
+        if (fresh.audible && !audioConfirmed) {
           failed.push({
             title: t.title || "",
             url: t.url || "",
@@ -754,6 +817,20 @@ export async function saveTabs(options: {
         );
       } catch {
         statsWarning = true;
+        try {
+          const cur2 = await s.readDatabaseUnlocked();
+          await s.writeDatabaseUnlocked(
+            {
+              ...cur2,
+              undo: actuallyClosedEntryIds.length
+                ? { ids: actuallyClosedEntryIds, expiresAt: now + UNDO_TTL_MS }
+                : null,
+            },
+            cur2.revision,
+          );
+        } catch {
+          // ignore
+        }
       }
 
       if (actuallyOpen.length) {
@@ -877,7 +954,11 @@ export async function restoreEntries(
       if (batch && i > 0 && i % batchSize === 0) {
         await new Promise((r) => setTimeout(r, 400));
       }
-      if (journal[entry.id]) {
+      const existingTabId = getJournalTabId(journal, entry.id);
+      if (
+        existingTabId != null &&
+        (await verifyTabAlive(existingTabId, entry.url))
+      ) {
         opened += 1;
         openedIds.push(entry.id);
         continue;
@@ -970,7 +1051,11 @@ export async function undoLastSave(): Promise<{
     const failedIds: string[] = [];
     const journal = await getJournal(UNDO_JOURNAL_KEY);
     for (const entry of entries) {
-      if (journal[entry.id]) {
+      const existingTabId = getJournalTabId(journal, entry.id);
+      if (
+        existingTabId != null &&
+        (await verifyTabAlive(existingTabId, entry.url))
+      ) {
         openedIds.push(entry.id);
         continue;
       }
@@ -1061,6 +1146,39 @@ export async function handleRequest(req: Request): Promise<Response> {
             scope = "current";
           }
         }
+        if (
+          req.tabId !== undefined &&
+          (typeof req.tabId !== "number" || !Number.isFinite(req.tabId))
+        ) {
+          return { ok: false, error: STRINGS.missingTabId };
+        }
+        if (
+          req.tabIds !== undefined &&
+          (!Array.isArray(req.tabIds) ||
+            req.tabIds.some(
+              (t) => typeof t !== "number" || !Number.isFinite(t),
+            ))
+        ) {
+          return { ok: false, error: "Invalid tabIds array." };
+        }
+        if (
+          req.confirmedAudio !== undefined &&
+          typeof req.confirmedAudio !== "boolean"
+        ) {
+          return { ok: false, error: "confirmedAudio must be a boolean." };
+        }
+        if (
+          req.confirmedUnsaved !== undefined &&
+          typeof req.confirmedUnsaved !== "boolean"
+        ) {
+          return { ok: false, error: "confirmedUnsaved must be a boolean." };
+        }
+        if (
+          req.confirmToken !== undefined &&
+          typeof req.confirmToken !== "string"
+        ) {
+          return { ok: false, error: "confirmToken must be a string." };
+        }
         const saveOpts: Parameters<typeof saveTabs>[0] = { scope };
         if (req.tabId != null) saveOpts.tabId = req.tabId;
         if (req.tabIds) saveOpts.tabIds = req.tabIds;
@@ -1072,24 +1190,42 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: await saveTabs(saveOpts) };
       }
       case "restore": {
-        const mode = req.mode;
+        if (
+          !Array.isArray(req.ids) ||
+          req.ids.some((x) => typeof x !== "string")
+        ) {
+          return { ok: false, error: STRINGS.invalidIdsArray };
+        }
+        const mode = req.mode as unknown as string;
+        if (mode !== undefined && mode !== "all" && mode !== "batch") {
+          return { ok: false, error: STRINGS.invalidRestoreMode };
+        }
         return {
           ok: true,
           data: await restoreEntries(
             req.ids,
-            mode != null ? { mode } : undefined,
+            mode != null ? { mode: mode as RestoreMode } : undefined,
           ),
         };
       }
       case "restore-group": {
+        if (typeof req.group !== "string") {
+          return { ok: false, error: "group must be a string." };
+        }
+        const mode = req.mode as unknown as string;
+        if (mode !== undefined && mode !== "all" && mode !== "batch") {
+          return { ok: false, error: STRINGS.invalidRestoreMode };
+        }
         const db = await s.readDatabase();
         const ids = db.entries
           .filter((e) => e.group === req.group)
           .map((e) => e.id);
-        const mode = req.mode;
         return {
           ok: true,
-          data: await restoreEntries(ids, mode != null ? { mode } : undefined),
+          data: await restoreEntries(
+            ids,
+            mode != null ? { mode: mode as RestoreMode } : undefined,
+          ),
         };
       }
       case "undo": {
@@ -1097,6 +1233,12 @@ export async function handleRequest(req: Request): Promise<Response> {
         return r.ok ? { ok: true, data: r } : { ok: false, error: r.message };
       }
       case "delete": {
+        if (
+          !Array.isArray(req.ids) ||
+          req.ids.some((x) => typeof x !== "string")
+        ) {
+          return { ok: false, error: STRINGS.invalidIdsArray };
+        }
         await withMutationWrite((db) => ({
           ...db,
           entries: db.entries.filter((e) => !req.ids.includes(e.id)),
@@ -1211,6 +1353,14 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { saved: true } };
       }
       case "edit-entry": {
+        if (
+          typeof req.id !== "string" ||
+          typeof req.group !== "string" ||
+          !Array.isArray(req.tags) ||
+          req.tags.some((t) => typeof t !== "string")
+        ) {
+          return { ok: false, error: STRINGS.invalidEditParams };
+        }
         await withMutationWrite((db) => ({
           ...db,
           entries: db.entries.map((e) =>
@@ -1317,11 +1467,11 @@ export async function handleRequest(req: Request): Promise<Response> {
         const tab = await chrome.tabs.get(req.tabId).catch(() => null);
         if (!tab) return { ok: false, error: "Tab not found." };
         if (tab.active) {
-          return { ok: false, error: "Cannot hibernate active tab." };
+          return { ok: false, error: STRINGS.cannotHibernateActive };
         }
         if (tab.pinned) return { ok: false, error: STRINGS.pinnedSkip };
         if (tab.audible)
-          return { ok: false, error: "Cannot hibernate media tabs." };
+          return { ok: false, error: STRINGS.cannotHibernateMedia };
         if (
           isWhitelisted(
             tab.url ?? "",
@@ -1379,7 +1529,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       default: {
         const _exhaustive: never = req;
         void _exhaustive;
-        return { ok: false, error: "Unknown request" };
+        return { ok: false, error: STRINGS.unknownRequest };
       }
     }
   } catch (e) {
@@ -1478,26 +1628,36 @@ export function registerServiceWorkerListeners(): void {
     })().catch((e) => console.error("command failed", e));
   });
 
+  async function handleContextMenuSave(
+    opts: Parameters<typeof saveTabs>[0],
+  ): Promise<void> {
+    const result = await saveTabs(opts);
+    try {
+      await chrome.storage.session.set({
+        lastSaveResult: result,
+        lastSaveAt: Date.now(),
+      });
+    } catch {
+      // session storage fallback
+    }
+    if (result.needsConfirmation.length || result.needsUnsavedAck) {
+      try {
+        await chrome.action.setPopup({ popup: "popup.html" });
+        await chrome.action.openPopup();
+      } catch {
+        await chrome.action.setPopup({ popup: "" });
+      }
+    }
+  }
+
   chrome.contextMenus.onClicked.addListener((info, tab) => {
     void (async () => {
       if (info.menuItemId === "save-tab" && tab?.id != null) {
-        const result = await saveTabs({ scope: "current", tabId: tab.id });
-        await chrome.storage.session.set({
-          lastSaveResult: result,
-          lastSaveAt: Date.now(),
-        });
-        if (result.needsConfirmation.length || result.needsUnsavedAck) {
-          try {
-            await chrome.action.setPopup({ popup: "popup.html" });
-            await chrome.action.openPopup();
-          } catch {
-            await chrome.action.setPopup({ popup: "" });
-          }
-        }
+        await handleContextMenuSave({ scope: "current", tabId: tab.id });
       } else if (info.menuItemId === "save-others") {
         const opts: Parameters<typeof saveTabs>[0] = { scope: "others" };
         if (tab?.id != null) opts.tabId = tab.id;
-        await saveTabs(opts);
+        await handleContextMenuSave(opts);
       } else if (info.menuItemId === "open-library") {
         await chrome.tabs.create({ url: chrome.runtime.getURL("list.html") });
       } else if (info.menuItemId === "hibernate" && tab?.id != null) {

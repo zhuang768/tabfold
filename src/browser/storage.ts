@@ -24,6 +24,19 @@ export interface StorageDriver {
   remove(keys: string[]): Promise<void>;
 }
 
+function appendSalvage(existing: unknown, payload: unknown): unknown[] {
+  const list: unknown[] = Array.isArray(existing)
+    ? [...existing]
+    : existing != null
+      ? [existing]
+      : [];
+  const serialized = JSON.stringify(payload);
+  if (!list.some((item) => JSON.stringify(item) === serialized)) {
+    list.push(payload);
+  }
+  return list;
+}
+
 export function chromeLocalDriver(): StorageDriver {
   return {
     async get(keys) {
@@ -268,15 +281,19 @@ export class LibraryStore {
     } catch (e) {
       if (e instanceof MigrationError) {
         const existingSalvage = data[SALVAGE_KEY];
-        const toSet: Record<string, unknown> = { [CORRUPT_KEY]: raw };
-        if (existingSalvage == null) toSet[SALVAGE_KEY] = raw;
+        const toSet: Record<string, unknown> = {
+          [CORRUPT_KEY]: raw,
+          [SALVAGE_KEY]: appendSalvage(existingSalvage, raw),
+        };
         await this.driver.set(toSet);
         throw new CorruptDataError(e.message, raw);
       }
       if (e instanceof CorruptDatabaseError) {
         const existingSalvage = data[SALVAGE_KEY];
-        const toSet: Record<string, unknown> = { [CORRUPT_KEY]: raw };
-        if (existingSalvage == null) toSet[SALVAGE_KEY] = raw;
+        const toSet: Record<string, unknown> = {
+          [CORRUPT_KEY]: raw,
+          [SALVAGE_KEY]: appendSalvage(existingSalvage, raw),
+        };
         await this.driver.set(toSet);
         // Keep DB_KEY so raw export still sees both; UI treats as corrupt
         throw new CorruptDataError(e.message, e.raw);
@@ -372,8 +389,10 @@ export class LibraryStore {
     } catch (e) {
       if (e instanceof MigrationError || e instanceof CorruptDatabaseError) {
         const existingSalvage = data[SALVAGE_KEY];
-        const toSet: Record<string, unknown> = { [CORRUPT_KEY]: raw };
-        if (existingSalvage == null) toSet[SALVAGE_KEY] = raw;
+        const toSet: Record<string, unknown> = {
+          [CORRUPT_KEY]: raw,
+          [SALVAGE_KEY]: appendSalvage(existingSalvage, raw),
+        };
         await this.driver.set(toSet);
         throw new CorruptDataError(
           e instanceof Error ? e.message : "Corrupt database",
@@ -461,7 +480,9 @@ export class LibraryStore {
         isCurrentCorrupt = true;
       }
       if (data[SALVAGE_KEY] == null || isCurrentCorrupt) {
-        await this.driver.set({ [SALVAGE_KEY]: currentRaw });
+        await this.driver.set({
+          [SALVAGE_KEY]: appendSalvage(data[SALVAGE_KEY], currentRaw),
+        });
       }
       try {
         const cur = migrateDatabase(currentRaw).database;
@@ -491,15 +512,28 @@ export class LibraryStore {
     await this.driver.set({ [DB_KEY]: restored });
     await this.driver.remove([CORRUPT_KEY]);
 
-    const readBack = await this.readDatabaseUnlocked();
-    if (!databaseContentMatches(restored, readBack)) {
+    const rollback = async () => {
+      const restoreMap: Record<string, unknown> = {};
       if (data[DB_KEY] !== undefined) {
-        await this.driver.set({ [DB_KEY]: data[DB_KEY] });
+        restoreMap[DB_KEY] = data[DB_KEY];
       }
       if (data[CORRUPT_KEY] !== undefined) {
-        await this.driver.set({ [CORRUPT_KEY]: data[CORRUPT_KEY] });
+        restoreMap[CORRUPT_KEY] = data[CORRUPT_KEY];
       }
-      throw new Error("Restored database content mismatch");
+      if (Object.keys(restoreMap).length > 0) {
+        await this.driver.set(restoreMap);
+      }
+    };
+
+    try {
+      const readBack = await this.readDatabaseUnlocked();
+      if (!databaseContentMatches(restored, readBack)) {
+        await rollback();
+        throw new Error("Restored database content mismatch");
+      }
+    } catch (err) {
+      await rollback().catch(() => undefined);
+      throw err;
     }
 
     return restored;

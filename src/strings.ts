@@ -186,6 +186,18 @@ export const STRINGS = {
   invalidSettingsPatch: "Invalid settings patch.",
   invalidBatchSize: "restoreBatchSize must be a number between 1 and 500.",
   searchLabel: "Search saved tabs",
+  unknownRequest: "Unknown request",
+  fileReadFailed: "File read failed",
+  openOptionsFailed: (err: string) => `Could not open settings: ${err}`,
+  libraryTitle: "Tabfold — Library",
+  settingsPageTitle: "Tabfold — Settings",
+  targetTabLabel: "Target tab",
+  groupFilterLabel: "Filter by group",
+  saveScopeLabel: "Save scope",
+  invalidRestoreMode: "Invalid restore mode.",
+  invalidIdsArray: "Invalid ids array.",
+  invalidEditParams: "Invalid edit parameters.",
+  invalidScope: "Invalid save scope.",
 
   // Menus / a11y
   menuSaveTab: "Save tab with Tabfold",
