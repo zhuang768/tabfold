@@ -33,7 +33,24 @@ function showStatus(
   const span = document.createElement("span");
   span.textContent = message;
   el.append(span);
-  if (undoIds.length) {
+
+  const activeUndoIds =
+    undoIds.length > 0
+      ? undoIds
+      : database?.undo &&
+          database.undo.expiresAt > Date.now() &&
+          database.undo.ids.length > 0
+        ? database.undo.ids
+        : [];
+
+  const actualTtl =
+    undoIds.length > 0
+      ? ttlMs
+      : database?.undo
+        ? Math.max(0, database.undo.expiresAt - Date.now())
+        : ttlMs;
+
+  if (activeUndoIds.length && actualTtl > 0) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.id = "btn-undo";
@@ -42,8 +59,8 @@ function showStatus(
     el.append(btn);
     if (undoTimer) window.clearTimeout(undoTimer);
     undoTimer = window.setTimeout(() => {
-      el.querySelectorAll("button").forEach((b) => b.remove());
-    }, ttlMs);
+      btn.remove();
+    }, actualTtl);
   }
 }
 
@@ -321,13 +338,28 @@ async function load(): Promise<void> {
   if (
     database.undo &&
     database.undo.expiresAt > Date.now() &&
-    database.undo.ids.length > 0 &&
-    !hasExistingStatus
+    database.undo.ids.length > 0
   ) {
     const count = database.undo.ids.length;
     const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
     const remainingMs = Math.max(0, database.undo.expiresAt - Date.now());
-    showStatus(msg, "ok", database.undo.ids, remainingMs);
+    if (!hasExistingStatus) {
+      showStatus(msg, "ok", database.undo.ids, remainingMs);
+    } else if (
+      typeof statusEl.querySelectorAll === "function" &&
+      statusEl.querySelectorAll("button").length === 0
+    ) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "btn-undo";
+      btn.textContent = STRINGS.undo;
+      btn.addEventListener("click", () => void doUndo());
+      statusEl.append(btn);
+      if (undoTimer) window.clearTimeout(undoTimer);
+      undoTimer = window.setTimeout(() => {
+        btn.remove();
+      }, remainingMs);
+    }
   }
 }
 
@@ -396,6 +428,14 @@ function initScopeSelect(): void {
 }
 
 async function init(): Promise<void> {
+  document.title = STRINGS.appName;
+  if (typeof document.querySelector === "function") {
+    const brandEl = document.querySelector(".brand");
+    if (brandEl) text(brandEl, STRINGS.appName);
+  }
+  const scopeEl = $("scope") as HTMLSelectElement | null;
+  if (scopeEl) scopeEl.setAttribute("aria-label", STRINGS.saveScopeLabel);
+
   initScopeSelect();
   // Clear sticky action popup so next toolbar click saves again (C10)
   void send({ type: "clear-action-popup" });
@@ -438,10 +478,16 @@ async function init(): Promise<void> {
     "click",
     () => void send({ type: "open-library" }),
   );
-  $("btn-settings").addEventListener(
-    "click",
-    () => void chrome.runtime.openOptionsPage(),
-  );
+  $("btn-settings").addEventListener("click", () => {
+    chrome.runtime.openOptionsPage().catch((err: unknown) => {
+      showStatus(
+        STRINGS.openOptionsFailed(
+          err instanceof Error ? err.message : String(err),
+        ),
+        "warn",
+      );
+    });
+  });
 
   try {
     const session = await chrome.storage.session.get([

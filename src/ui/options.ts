@@ -26,6 +26,8 @@ function showStatus(
   el.textContent = message;
 }
 
+let isLoaded = false;
+
 async function load(): Promise<void> {
   const res = await send<{
     database: Database | null;
@@ -35,10 +37,12 @@ async function load(): Promise<void> {
   }>({ type: "get-state" });
 
   if (!res.ok) {
+    isLoaded = false;
     text($("where-data"), res.error);
     showStatus(res.error, "danger");
     return;
   }
+  isLoaded = true;
 
   // Always show backups even when corrupt (C03)
   const host = $("backups");
@@ -128,6 +132,12 @@ function fillSelects(): void {
 }
 
 async function init(): Promise<void> {
+  document.title = STRINGS.settingsPageTitle;
+  if (typeof document.querySelector === "function") {
+    const brandEl = document.querySelector(".brand");
+    if (brandEl) text(brandEl, STRINGS.appName);
+  }
+
   text($("title"), STRINGS.settingsTitle);
   text($("label-remove"), STRINGS.removeAfterRestore);
   text($("label-scope"), STRINGS.defaultScope);
@@ -161,6 +171,10 @@ async function init(): Promise<void> {
   });
 
   $("btn-save").addEventListener("click", async () => {
+    if (!isLoaded) {
+      showStatus(STRINGS.settingsSaveFailed, "warn");
+      return;
+    }
     const submittedForm = {
       removeAfterRestore: ($("remove-after") as HTMLInputElement).checked,
       defaultScope: ($("default-scope") as HTMLSelectElement).value,

@@ -92,12 +92,38 @@ if (existsSync(iconsDir)) {
   cpSync(iconsDir, join(dist, "icons"), { recursive: true });
 }
 
-// Rewrite HTML script/link if needed — popup.ts bundles to popup.js at dist root
+// Rewrite HTML script/link and synchronize static title/aria from STRINGS (R414)
 const htmlFiles = ["popup.html", "list.html", "options.html"];
+const titles: Record<string, string> = {
+  "popup.html": STRINGS.appName,
+  "list.html": STRINGS.libraryTitle,
+  "options.html": STRINGS.settingsPageTitle,
+};
 for (const h of htmlFiles) {
   const p = join(dist, h);
-  const html = readFileSync(p, "utf8");
-  // ensure relative assets
+  let html = readFileSync(p, "utf8");
+  if (titles[h]) {
+    html = html.replace(/<title>.*?<\/title>/, `<title>${titles[h]}</title>`);
+  }
+  html = html.replace(
+    /<p class="brand">.*?<\/p>/,
+    `<p class="brand">${STRINGS.appName}</p>`,
+  );
+  if (h === "popup.html") {
+    html = html.replace(
+      /id="scope" aria-label=".*?"/,
+      `id="scope" aria-label="${STRINGS.saveScopeLabel}"`,
+    );
+  } else if (h === "list.html") {
+    html = html.replace(
+      /id="target-tab" aria-label=".*?"/,
+      `id="target-tab" aria-label="${STRINGS.targetTabLabel}"`,
+    );
+    html = html.replace(
+      /id="group-filter" aria-label=".*?"/,
+      `id="group-filter" aria-label="${STRINGS.groupFilterLabel}"`,
+    );
+  }
   writeFileSync(p, html);
 }
 

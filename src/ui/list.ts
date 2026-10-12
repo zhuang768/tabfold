@@ -42,7 +42,24 @@ function showStatus(
   const span = document.createElement("span");
   span.textContent = message;
   el.append(span);
-  if (undoIds.length) {
+
+  const activeUndoIds =
+    undoIds.length > 0
+      ? undoIds
+      : database?.undo &&
+          database.undo.expiresAt > Date.now() &&
+          database.undo.ids.length > 0
+        ? database.undo.ids
+        : [];
+
+  const actualTtl =
+    undoIds.length > 0
+      ? ttlMs
+      : database?.undo
+        ? Math.max(0, database.undo.expiresAt - Date.now())
+        : ttlMs;
+
+  if (activeUndoIds.length && actualTtl > 0) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.id = "btn-undo";
@@ -51,8 +68,8 @@ function showStatus(
     el.append(btn);
     if (undoTimer) window.clearTimeout(undoTimer);
     undoTimer = window.setTimeout(() => {
-      el.querySelectorAll("button").forEach((b) => b.remove());
-    }, ttlMs);
+      btn.remove();
+    }, actualTtl);
   }
 }
 
@@ -216,10 +233,11 @@ function renderList(entries: SavedTab[]): void {
     restore.className = "btn-restore";
     restore.textContent = STRINGS.restore;
     restore.addEventListener("click", async () => {
+      if (isRestoring) return;
       row.classList.add("restoring");
       try {
         await restoreWithGuard([entry.id]);
-      } catch {
+      } finally {
         row.classList.remove("restoring");
       }
     });
@@ -264,9 +282,13 @@ function paint(): void {
   renderList(sortEntriesNewestFirst(entries));
 }
 
+let loadGeneration = 0;
+let targetsGeneration = 0;
+
 async function refreshTargets(): Promise<void> {
-  const select = $("target-tab") as HTMLSelectElement;
-  select.replaceChildren();
+  const currentGen = ++targetsGeneration;
+  const select = $("target-tab") as HTMLSelectElement | null;
+  if (!select) return;
   const res = await send<{
     tabs: Array<{
       id: number;
@@ -275,6 +297,10 @@ async function refreshTargets(): Promise<void> {
       discarded?: boolean;
     }>;
   }>({ type: "list-window-tabs" });
+  if (currentGen !== targetsGeneration || database === null) {
+    return;
+  }
+  select.replaceChildren();
   if (!res.ok) {
     showStatus(res.error, "danger");
     return;
@@ -295,14 +321,17 @@ async function refreshTargets(): Promise<void> {
 }
 
 async function load(): Promise<void> {
+  const currentGen = ++loadGeneration;
   const res = await send<{
     database: Database | null;
     backups?: unknown[];
     corrupt?: boolean;
     message?: string;
   }>({ type: "get-state" });
+  if (currentGen !== loadGeneration) return;
   if (!res.ok) {
     database = null;
+    ++targetsGeneration;
     $("list").replaceChildren();
     const select = $("target-tab") as HTMLSelectElement;
     select.replaceChildren();
@@ -312,6 +341,7 @@ async function load(): Promise<void> {
   }
   if (!res.data.database) {
     database = null;
+    ++targetsGeneration;
     $("list").replaceChildren();
     const select = $("target-tab") as HTMLSelectElement;
     select.replaceChildren();
@@ -332,18 +362,44 @@ async function load(): Promise<void> {
   if (
     database.undo &&
     database.undo.expiresAt > Date.now() &&
-    database.undo.ids.length > 0 &&
-    !hasExistingStatus
+    database.undo.ids.length > 0
   ) {
     const count = database.undo.ids.length;
     const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
     const remainingMs = Math.max(0, database.undo.expiresAt - Date.now());
-    showStatus(msg, "ok", database.undo.ids, remainingMs);
+    if (!hasExistingStatus) {
+      showStatus(msg, "ok", database.undo.ids, remainingMs);
+    } else if (
+      typeof statusEl.querySelectorAll === "function" &&
+      statusEl.querySelectorAll("button").length === 0
+    ) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "btn-undo";
+      btn.textContent = STRINGS.undo;
+      btn.addEventListener("click", () => void doUndo());
+      statusEl.append(btn);
+      if (undoTimer) window.clearTimeout(undoTimer);
+      undoTimer = window.setTimeout(() => {
+        btn.remove();
+      }, remainingMs);
+    }
   }
   await refreshTargets();
 }
 
 async function init(): Promise<void> {
+  document.title = STRINGS.libraryTitle;
+  if (typeof document.querySelector === "function") {
+    const brandEl = document.querySelector(".brand");
+    if (brandEl) text(brandEl, STRINGS.appName);
+  }
+  const targetTab = $("target-tab") as HTMLSelectElement | null;
+  if (targetTab) targetTab.setAttribute("aria-label", STRINGS.targetTabLabel);
+  const groupFilterEl = $("group-filter") as HTMLSelectElement | null;
+  if (groupFilterEl)
+    groupFilterEl.setAttribute("aria-label", STRINGS.groupFilterLabel);
+
   text($("subtitle"), STRINGS.tagline);
   text($("btn-save"), STRINGS.saveSelectedTab);
   text($("btn-hibernate"), STRINGS.discardTab);
@@ -364,6 +420,10 @@ async function init(): Promise<void> {
   ($("search") as HTMLInputElement).placeholder = STRINGS.searchPlaceholder;
 
   $("btn-save").addEventListener("click", async () => {
+    if (!database) {
+      showStatus(STRINGS.pickWebTab, "warn");
+      return;
+    }
     const id = Number(($("target-tab") as HTMLSelectElement).value);
     if (!id) {
       showStatus(STRINGS.pickWebTab, "warn");
@@ -449,10 +509,16 @@ async function init(): Promise<void> {
       btn.removeAttribute("aria-busy");
     }
   });
-  $("btn-settings").addEventListener(
-    "click",
-    () => void chrome.runtime.openOptionsPage(),
-  );
+  $("btn-settings").addEventListener("click", () => {
+    chrome.runtime.openOptionsPage().catch((err: unknown) => {
+      showStatus(
+        STRINGS.openOptionsFailed(
+          err instanceof Error ? err.message : String(err),
+        ),
+        "warn",
+      );
+    });
+  });
   $("btn-export").addEventListener("click", async () => {
     const res = await send<{ text: string }>({ type: "export-json" });
     if (res.ok)
@@ -508,7 +574,7 @@ async function init(): Promise<void> {
               "message" in err &&
               typeof (err as { message: unknown }).message === "string"
             ? (err as { message: string }).message
-            : "File read failed";
+            : STRINGS.fileReadFailed;
       showStatus(msg, "danger");
     } finally {
       input.value = "";
@@ -536,7 +602,7 @@ async function init(): Promise<void> {
               "message" in err &&
               typeof (err as { message: unknown }).message === "string"
             ? (err as { message: string }).message
-            : "File read failed";
+            : STRINGS.fileReadFailed;
       showStatus(msg, "danger");
     } finally {
       input.value = "";
