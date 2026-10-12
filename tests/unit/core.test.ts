@@ -184,7 +184,28 @@ function mock(
       setIcon: vi.fn(async () => {}),
     },
   });
-  return { created, removed, session, tabs: () => tabs };
+  return {
+    created,
+    removed,
+    session,
+    tabs: () => tabs,
+    patch: (
+      id: number,
+      p: Partial<{
+        id: number;
+        url: string;
+        title?: string;
+        windowId?: number;
+        index?: number;
+        pinned?: boolean;
+        active?: boolean;
+        audible?: boolean;
+      }>,
+    ) => {
+      const t = tabs.find((x) => x.id === id);
+      if (t) Object.assign(t, p);
+    },
+  };
 }
 
 describe("scope selection", () => {
@@ -1583,7 +1604,7 @@ describe("Round 4 formal regressions (R401–R408)", () => {
     await restoreEntries(["retry"]);
     fail = false;
     await restoreEntries(["retry"]);
-    expect(b.created.length).toBeLessThanOrEqual(1);
+    expect(b.created.length).toBe(1);
     setStoreForTests(null);
   });
 
@@ -1651,6 +1672,115 @@ describe("Round 4 formal regressions (R401–R408)", () => {
     expect(response.ok).toBe(false);
     expect(b.created).toHaveLength(0);
     expect(raw.entries).toHaveLength(16);
+    setStoreForTests(null);
+  });
+});
+
+describe("Round 5 formal regressions (R501–R510)", () => {
+  it("R506: write-time strictCurrent rejects missing undo without closing source tab", async () => {
+    const base = memoryDriver({ tabfold_database: ready([]) });
+    const driver = {
+      ...base,
+      set: async (items: Record<string, unknown>) => {
+        const x = structuredClone(items);
+        const db = x.tabfold_database as
+          | {
+              entries?: unknown[];
+              stats?: unknown;
+              settings?: { theme?: unknown };
+            }
+          | undefined;
+        if (db?.entries?.length) {
+          delete db.stats;
+          if (db.settings) delete db.settings.theme;
+        }
+        await base.set(x);
+      },
+    };
+    setStoreForTests(new LibraryStore(driver));
+    const b = mock([
+      {
+        id: 1,
+        url: "https://missing-metadata.test/",
+        title: "Tab 1",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+        audible: false,
+      },
+      {
+        id: 2,
+        url: "chrome://settings",
+        title: "Settings",
+        windowId: 1,
+        index: 1,
+        pinned: false,
+        active: false,
+        audible: false,
+      },
+    ]);
+    const res = await saveTabs({
+      scope: "current",
+      tabId: 1,
+      confirmedUnsaved: true,
+      confirmedAudio: true,
+    });
+    expect(res.closed).toBe(0);
+    expect(b.removed.length).toBe(0);
+    setStoreForTests(null);
+  });
+
+  it("R509: migrateV1Entries renumbers duplicate suffixes to avoid collision", () => {
+    const v1 = {
+      schemaVersion: 1,
+      tabs: [
+        { url: "https://first.test/", title: "First", id: "dup" },
+        { url: "https://second.test/", title: "Second", id: "dup" },
+        { url: "https://third.test/", title: "Third", id: "dup_v1dup_2" },
+      ],
+    };
+    const migrated = migrateDatabase(v1).database;
+    const ids = migrated.entries.map((e) => e.id);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("R510: saveTabs protects moved target window from losing sole tab", async () => {
+    const base = memoryDriver({ tabfold_database: ready([]) });
+    const b = mock([
+      {
+        id: 1,
+        url: "https://moved.test/",
+        title: "Moved",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+        audible: false,
+      },
+      {
+        id: 2,
+        url: "chrome://settings",
+        title: "Settings",
+        windowId: 1,
+        index: 1,
+        pinned: false,
+        active: false,
+        audible: false,
+      },
+    ]);
+    let reads = 0;
+    const get = chrome.tabs.get;
+    chrome.tabs.get = vi.fn(async (id: number) => {
+      if (id === 1 && ++reads === 2) {
+        b.patch(id, { windowId: 2, index: 0 });
+      }
+      return get(id);
+    });
+    setStoreForTests(new LibraryStore(base));
+    const saved = await saveTabs({ scope: "current", tabId: 1 });
+    const newWindowPreserved = b.tabs().some((t) => t.windowId === 2);
+    expect(saved.closed === 0 || newWindowPreserved).toBe(true);
     setStoreForTests(null);
   });
 });

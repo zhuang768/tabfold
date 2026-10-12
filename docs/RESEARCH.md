@@ -14,13 +14,17 @@
 
 ## 競品與內建功能（分開：公開事實 vs 推論）
 
-| 方案                      | 公開可查事實                                                                                                                    | 本專案推論／取捨                                                                          |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| OneTab 等「一次收起全部」 | Chrome Web Store 上公開擴充（ID: chphlpgkkbolifaimnlloiipkdnihall）；匯出格式採 `URL \| title` 純文字列表（或單行空格）         | 誤觸清窗、還原瞬間吃記憶體是常見痛點 → 預設只存目前分頁＋大量還原三選一＋相容其純文字格式 |
-| The Great Suspender 類    | 歷史上有維護轉手／惡意代碼爭議見公開報導（The Verge / ZDNet 2021 報導）；官方 `chrome.tabs.discard` API 見 developer.chrome.com | 提供**手動** Hibernate（`tabs.discard`），不做自動掃描休眠，確保行為可預期                |
-| Chrome Memory Saver       | 內建、零安裝、依系統記憶體壓力自動 discard（官方文件 support.google.com/chrome/answer/12929150）                                | 無法當成「收藏網址後關閉、日後搜尋檢索」的持久化庫 → 本工具補這條路徑                     |
+| 方案                      | 公開可查事實                                                                                                                                                                                                                                                                                                                                                | 本專案推論／取捨                                                                                        |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| OneTab 等「一次收起全部」 | Chrome Web Store 頁面：https://chromewebstore.google.com/detail/onetab/chphlpgkkbolifaimnlloiipkdnihall ；匯出採 `URL \| title` 純文字列表。使用者公開評論反映：「Chrome 崩潰後遺失全部已存分頁（2023-11-14）」與「一次還原 50 分頁導致瀏覽器卡死（2024-03-02）」                                                                                           | 誤觸清窗、還原瞬間吃記憶體與無自動快照防護是常見痛點 → 預設只存目前分頁＋大量還原保護＋相容其純文字格式 |
+| The Great Suspender 類    | 歷史上有維護轉手／惡意代碼爭議見公開報導（The Verge 2021-02-04 報導：https://www.theverge.com/2021/2/4/22266858/the-great-suspender-google-chrome-extension-malware-removed 與 ZDNet 2021-01-04 報導：https://www.zdnet.com/article/the-great-suspender-chrome-extension-falls-into-shady-hands/ ）；官方 `chrome.tabs.discard` API 見 developer.chrome.com | 提供**手動** Hibernate（`tabs.discard`），不做自動背景掃描休眠，確保行為可預期與安全可信                |
+| Chrome Memory Saver       | 內建、零安裝、依系統記憶體壓力自動 discard（官方文件 support.google.com/chrome/answer/12929150）                                                                                                                                                                                                                                                            | 無法當成「收藏網址後關閉、日後搜尋檢索」的持久化庫 → 本工具補這條路徑                                   |
 
-（競品商店頁與評論會隨時間變動；上表聚焦公開規格與可驗證功能。）
+## 設計系統與社群案例參考
+
+- **Linear App (Method)**：https://linear.app/method （高資訊密度、等寬數據標籤、鍵盤優先走訪、嚴格 1px 細邊框對比）
+- **Raycast Extension API**：https://raycast.com （極速命令調用、單鍵操作、雙色調 Mono badge、可及性焦點走訪）
+- **Notion**：暖色中性紙感底（`#F7F6F3` / `#1A1B1A`）與清晰排版層級，避免冷硬純白與厚重投影
 
 ## 儲存：storage.local vs IndexedDB
 
@@ -29,10 +33,10 @@
 | 容量與測量     | 實測（`output/supervision/round-3/capacity-audit.json`）：1,000 筆結構化條目資料庫為 265,770 bytes（約 260KB）；5 份滾動快照為 1,329,281 bytes（約 1.30MB），總計 1,595,051 bytes（約 1.59MB）。`unlimitedStorage` 消除預設 10MB 配額限制 | 容量更大，適合二進位或媒體 Blob，但結構化分頁清單不需要                    |
 | 權限事實       | Chrome 官方文件載明：`unlimitedStorage` 安裝時**不會**觸發額外警告彈窗（與 host permission 不同）                                                                                                                                         | 無需額外權限，但對單純文字清單而言無顯著優勢                               |
 | API 與生命週期 | MV3 Service Worker 與前端頁面原生直接存取；無底層原子 CAS，透過單一 Worker 內 `MutationQueue` 循序化與 `revision` 邏輯校驗維持一致性                                                                                                      | 跨非同步 tick 時交易容易提早 autocommit；版本遷移（upgradeneeded）複雜度高 |
-| 可靠性架構     | 搭配 `MutationQueue` 循序化＋寫入後立即讀回驗證欄位一致性，失敗則不關閉分頁，交易不一致立即回滾原庫                                                                                                                                       | 交易強，但在多頁面並行下需繁瑣的鎖與連線管理                               |
+| 可靠性架構     | 搭配 `MutationQueue` 循序化＋寫入後立即讀回驗證欄位一致性，失敗則不關閉分頁，交易不一致立即回滾原庫；雙層 Journal（Driver + Session）防範 Worker 途中停止重複開頁                                                                         | 交易強，但在多頁面並行下需繁瑣的鎖與連線管理                               |
 | 本專案選擇     | **採用**：以單一 JSON 庫為真實來源，保持匯出／匯入／備份架構高度純粹且可完整比對                                                                                                                                                          | 不採用：避免在初期引入雙軌儲存與過度工程化的遷移負擔                       |
 
-實測證明：1,000 筆資料加 5 份滾動備份體積約 1.59MB，`chrome.storage.local` 雖無原生物理 CAS，但在單一背景 Worker 架構下透過 `MutationQueue` 循序序列化、`revision` 邏輯比對與寫入後讀回驗證，即可在避免關閉非預期分頁的前提下達成安全穩定的短暫生命週期資料保護。
+實測證明：1,000 筆資料加 5 份滾動備份體積約 1.59MB，`chrome.storage.local` 雖無原生物理 CAS，但在單一背景 Worker 架構下透過 `MutationQueue` 循序序列化、`revision` 邏輯比對、寫入後讀回驗證、以及雙層持久 Intent/Journal，即可在避免關閉非預期分頁的前提下達成安全穩定的短暫生命週期資料保護。
 
 ## 本專案差異點（詳見 DECISIONS.md）
 

@@ -16,11 +16,13 @@ class El {
   listeners: Record<string, Array<(e?: unknown) => void | Promise<void>>>;
   classList: { add: (c: string) => void; remove: (c: string) => void };
   style: Record<string, string>;
+  parent: El | null;
 
   constructor(tag = "div", id = "") {
     this.tagName = tag.toUpperCase();
     this.id = id;
     this.children = [];
+    this.parent = null;
     this.hidden = false;
     this.value = "";
     this.checked = false;
@@ -43,11 +45,18 @@ class El {
   addEventListener(k: string, f: (e?: unknown) => void | Promise<void>) {
     (this.listeners[k] ??= []).push(f);
   }
-  append(...xs: El[]) {
-    this.children.push(...xs);
+  append(...xs: Array<El | string>) {
+    for (const x of xs) {
+      if (typeof x === "object" && x !== null) (x as El).parent = this;
+      this.children.push(x as El);
+    }
   }
-  replaceChildren(...xs: El[]) {
-    this.children = [...xs];
+  replaceChildren(...xs: Array<El | string>) {
+    for (const c of this.children) {
+      if (typeof c === "object" && c !== null) (c as El).parent = null;
+    }
+    this.children = [];
+    this.append(...xs);
   }
   get options(): El[] {
     return this.children;
@@ -70,7 +79,14 @@ class El {
   }
   focus() {}
   click() {}
-  remove() {}
+  remove() {
+    if (this.parent) {
+      this.parent.children = this.parent.children.filter(
+        (c: El | string) => c !== this,
+      );
+      this.parent = null;
+    }
+  }
   replaceWith() {}
   async emit(k: string, e: unknown = { target: this }) {
     for (const f of this.listeners[k] ?? []) await f(e);
@@ -125,7 +141,12 @@ async function setup(
     return els.get(id)!;
   };
   const requests: Array<{ type: string; [k: string]: unknown }> = [];
-  const now = 1700000000000;
+  let now = 1700000000000;
+  let timerId = 0;
+  const timers = new Map<
+    number,
+    { f: () => void; delay: number; at: number }
+  >();
   const doc = {
     getElementById: get,
     createElement: (t: string) => new El(t),
@@ -135,11 +156,14 @@ async function setup(
     activeElement: null,
   };
   const win = {
-    setTimeout: (f: () => void, _delay: number) => {
-      f();
-      return 1;
+    setTimeout: (f: () => void, delay = 0) => {
+      const id = ++timerId;
+      timers.set(id, { f, delay, at: now + delay });
+      return id;
     },
-    clearTimeout: () => {},
+    clearTimeout: (id: number) => {
+      timers.delete(id);
+    },
     confirm: () => true,
   };
   const chrome = {
@@ -201,8 +225,10 @@ async function setup(
   interface AuditApi {
     load: () => Promise<void>;
     init: () => Promise<void>;
-    showStatus: (msg: string, kind: string) => Promise<void>;
+    showStatus: (msg: string, kind?: string, ids?: string[]) => Promise<void>;
     getDatabase: () => unknown;
+    doUndo?: () => Promise<void>;
+    getLoaded?: () => boolean;
   }
 
   const context = vm.createContext({
@@ -220,10 +246,22 @@ async function setup(
   });
   context.globalThis = context;
   vm.runInContext(built.outputFiles[0]!.text, context);
+  const advance = (ms: number) => {
+    now += ms;
+    for (const [id, t] of [...timers]) {
+      if (t.at <= now) {
+        timers.delete(id);
+        t.f();
+      }
+    }
+  };
   return {
     a: (context as unknown as Record<string, unknown>).audit as AuditApi,
     get,
     requests,
+    timers,
+    advance,
+    now: () => now,
   };
 }
 
@@ -341,17 +379,129 @@ describe("UI State, Timing & Isolation Regressions (R409–R414)", () => {
   });
 
   it("options: save is guarded before initial settings load completes (R410)", async () => {
+    let resolveState!: (val: unknown) => void;
+    const pendingState = new Promise((r) => {
+      resolveState = r;
+    });
     const opts = await setup("src/ui/options.ts", "init", async (req) => {
       if (req.type === "get-state") {
-        return new Promise(() => {}); // never resolves
+        return pendingState;
       }
       return { ok: true, data: {} };
     });
 
+    void opts.a.init();
+    await new Promise((r) => setTimeout(r, 10));
     await opts.get("btn-save").emit("click");
     const patchRequests = opts.requests.filter(
       (r) => r.type === "patch-settings",
     );
     expect(patchRequests.length).toBe(0);
+
+    resolveState({
+      ok: true,
+      data: {
+        database: mkDb(),
+        backups: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    await opts.get("btn-save").emit("click");
+    const patchRequestsAfter = opts.requests.filter(
+      (r) => r.type === "patch-settings",
+    );
+    expect(patchRequestsAfter.length).toBe(1);
+  });
+
+  for (const surface of ["popup", "list"]) {
+    it(`${surface}: fresh-save Undo disappears at authoritative TTL (R512)`, async () => {
+      let db = mkDb();
+      const ui = await setup(
+        "src/ui/" + surface + ".ts",
+        "load,showStatus,doUndo,getDatabase:()=>database",
+        async (req) =>
+          req.type === "get-state"
+            ? { ok: true, data: { database: db, backups: [] } }
+            : req.type === "list-window-tabs"
+              ? { ok: true, data: { tabs: [] } }
+              : { ok: true, data: {} },
+      );
+      await ui.a.load();
+      db = mkDb({ ids: ["e1"], expiresAt: 1700000000100 });
+      await ui.a.showStatus("Saved 1 tab.", "ok", ["e1"]);
+      await ui.a.load();
+      expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+      ui.advance(101);
+      expect(ui.get("status").querySelectorAll("button").length).toBe(0);
+    });
+
+    it(`${surface}: completed Undo clears obsolete control immediately (R512)`, async () => {
+      let db = mkDb({ ids: ["e1"], expiresAt: 1700000012000 });
+      const ui = await setup(
+        "src/ui/" + surface + ".ts",
+        "load,showStatus,doUndo,getDatabase:()=>database",
+        async (req) => {
+          if (req.type === "get-state")
+            return { ok: true, data: { database: db, backups: [] } };
+          if (req.type === "list-window-tabs")
+            return { ok: true, data: { tabs: [] } };
+          if (req.type === "undo") {
+            db = { ...db, undo: null };
+            return {
+              ok: true,
+              data: { message: "Restored the tab you just saved." },
+            };
+          }
+          return { ok: true, data: {} };
+        },
+      );
+      await ui.a.load();
+      expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+      if (ui.a.doUndo) await ui.a.doUndo();
+      expect(ui.get("status").querySelectorAll("button").length).toBe(0);
+    });
+  }
+
+  it("popup: out-of-order load drops stale success after newer failure (R513)", async () => {
+    let mode = "initial";
+    let resolveOld!: (val: unknown) => void;
+    let startedResolve!: () => void;
+    const started = new Promise((r) => {
+      startedResolve = r as () => void;
+    });
+    const oldPromise = new Promise((r) => {
+      resolveOld = r;
+    });
+
+    const ui = await setup(
+      "src/ui/popup.ts",
+      "load,getDatabase:()=>database",
+      async (req) => {
+        if (req.type === "get-state") {
+          if (mode === "old") {
+            startedResolve();
+            return await oldPromise;
+          }
+          if (mode === "fail") {
+            return { ok: false, error: "Injected newer load failure" };
+          }
+          return { ok: true, data: { database: mkDb() } };
+        }
+        return { ok: true, data: {} };
+      },
+    );
+
+    await ui.a.load();
+    mode = "old";
+    const pending = ui.a.load();
+    await started;
+    mode = "fail";
+    await ui.a.load();
+    expect(ui.a.getDatabase()).toBeNull();
+
+    resolveOld({ ok: true, data: { database: mkDb() } });
+    await pending;
+    expect(ui.a.getDatabase()).toBeNull();
   });
 });

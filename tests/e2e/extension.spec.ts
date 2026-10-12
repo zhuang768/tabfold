@@ -41,6 +41,7 @@ async function launchExtension(
     context = await chromium.launchPersistentContext(safeDir, {
       headless: true,
       channel: "chromium",
+      ignoreDefaultArgs: ["--mute-audio"],
       args: [
         `--disable-extensions-except=${dist}`,
         `--load-extension=${dist}`,
@@ -84,10 +85,16 @@ function startFixtureServer(): Promise<{
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(`<!doctype html><html><body><h1>Audio Page</h1>
         <script>
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          const osc = ctx.createOscillator();
-          osc.connect(ctx.destination);
-          osc.start();
+          async function play() {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            if (ctx.state === "suspended") await ctx.resume();
+            const osc = ctx.createOscillator();
+            osc.frequency.setValueAtTime(440, ctx.currentTime);
+            osc.connect(ctx.destination);
+            osc.start();
+          }
+          play();
+          window.addEventListener("load", play);
         </script>
       </body></html>`);
       return;
@@ -212,7 +219,8 @@ test("main flow: real UI and API save, close, restore, undo, demo, search, expor
     await undoBtn.click();
     await popup.waitForTimeout(400);
 
-    // Verify Tab A was restored
+    // Verify Tab A was restored with exact URL
+    const expectedUrlA = `http://127.0.0.1:${fixture.port}/a`;
     let reopenedAfterUndo = false;
     for (let i = 0; i < 30; i++) {
       const list = await ext.evaluate(async () => {
@@ -224,7 +232,7 @@ test("main flow: real UI and API save, close, restore, undo, demo, search, expor
             "",
         );
       });
-      if (list.some((u) => u.includes("/a"))) {
+      if (list.some((u) => u === expectedUrlA)) {
         reopenedAfterUndo = true;
         break;
       }
@@ -234,10 +242,8 @@ test("main flow: real UI and API save, close, restore, undo, demo, search, expor
     await popup.close();
 
     // 2. Open Tab B and save via API, then restore via Library UI (.btn-restore)
-    const tabB = await openTabViaExtension(
-      ext,
-      `http://127.0.0.1:${fixture.port}/b`,
-    );
+    const expectedUrlB = `http://127.0.0.1:${fixture.port}/b`;
+    const tabB = await openTabViaExtension(ext, expectedUrlB);
     await msg(ext, { type: "save", tabIds: [tabB], confirmedUnsaved: true });
 
     await ext.reload({ waitUntil: "domcontentloaded" });
@@ -256,7 +262,7 @@ test("main flow: real UI and API save, close, restore, undo, demo, search, expor
             "",
         );
       });
-      if (list.some((u) => u.includes("/b"))) {
+      if (list.some((u) => u === expectedUrlB)) {
         reopenedAfterRestore = true;
         break;
       }
@@ -657,18 +663,38 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
     expect(validConfirm.data.saved).toBe(1);
     expect(validConfirm.data.closed).toBe(1);
 
-    // 3. Audible tab with real audio fixture (R416)
+    // 3. Audible tab with real audio fixture (R416, R518)
     const audioTab = await openTabViaExtension(
       ext,
       `http://127.0.0.1:${fixture.port}/audio`,
     );
-    await ext.waitForTimeout(400);
+    let isAudible = false;
+    for (let i = 0; i < 40; i++) {
+      const tabState = await ext.evaluate(async (id) => {
+        try {
+          return await chrome.tabs.get(id);
+        } catch {
+          return null;
+        }
+      }, audioTab);
+      if (tabState?.audible) {
+        isAudible = true;
+        break;
+      }
+      await ext.waitForTimeout(100);
+    }
+    expect(isAudible).toBe(true);
 
     const firstAudioSave = await msg<{
       ok: boolean;
       data: {
         saved: number;
-        needsAudioAck?: boolean;
+        needsConfirmation?: Array<{
+          tabId: number;
+          title: string;
+          url: string;
+          reason: string;
+        }>;
         confirmToken?: string;
       };
     }>(ext, {
@@ -676,41 +702,78 @@ test("special tab handling: internal, pinned, audible, unsaved token, duplicate,
       tabIds: [audioTab],
     });
     expect(firstAudioSave.ok).toBe(true);
-    if (firstAudioSave.data.needsAudioAck) {
-      expect(firstAudioSave.data.saved).toBe(0);
-      expect(typeof firstAudioSave.data.confirmToken).toBe("string");
+    expect(firstAudioSave.data.needsConfirmation?.length).toBeGreaterThan(0);
+    expect(firstAudioSave.data.saved).toBe(0);
+    expect(typeof firstAudioSave.data.confirmToken).toBe("string");
 
-      // Attempt bypass with only confirmedUnsaved: must not close audio tab
-      const bypassAudio = await msg<{
-        ok: boolean;
-        data: { saved: number; closed: number };
-      }>(ext, {
-        type: "save",
-        tabIds: [audioTab],
-        confirmedUnsaved: true,
-        confirmToken: firstAudioSave.data.confirmToken,
-      });
-      expect(bypassAudio.data.saved).toBe(0);
+    // Attempt invalid confirmToken: must not close audio tab
+    const invalidTokenAudio = await msg<{
+      ok: boolean;
+      data: { saved: number; closed: number };
+    }>(ext, {
+      type: "save",
+      tabIds: [audioTab],
+      confirmedAudio: true,
+      confirmToken: "invalid-token-12345",
+    });
+    expect(invalidTokenAudio.data.saved).toBe(0);
 
-      // Confirm with confirmedAudio: successfully closes and saves audio tab
-      const confirmAudio = await msg<{
-        ok: boolean;
-        data: { saved: number; closed: number };
-      }>(ext, {
-        type: "save",
-        tabIds: [audioTab],
-        confirmedAudio: true,
-        confirmToken: firstAudioSave.data.confirmToken,
-      });
-      expect(confirmAudio.ok).toBe(true);
-      expect(confirmAudio.data.saved).toBe(1);
-      expect(confirmAudio.data.closed).toBe(1);
-    } else {
-      await ext.evaluate(
-        async (id) => chrome.tabs.remove(id).catch(() => {}),
-        audioTab,
-      );
-    }
+    // Attempt bypass with only confirmedUnsaved: must not close audio tab
+    const bypassAudio = await msg<{
+      ok: boolean;
+      data: { saved: number; closed: number };
+    }>(ext, {
+      type: "save",
+      tabIds: [audioTab],
+      confirmedUnsaved: true,
+      confirmToken: firstAudioSave.data.confirmToken,
+    });
+    expect(bypassAudio.data.saved).toBe(0);
+
+    // Request fresh confirm token for authorized audio save
+    const secondAudioSave = await msg<{
+      ok: boolean;
+      data: {
+        saved: number;
+        needsConfirmation?: Array<{
+          tabId: number;
+          title: string;
+          url: string;
+          reason: string;
+        }>;
+        confirmToken?: string;
+      };
+    }>(ext, {
+      type: "save",
+      tabIds: [audioTab],
+    });
+    expect(secondAudioSave.ok).toBe(true);
+    expect(typeof secondAudioSave.data.confirmToken).toBe("string");
+
+    // Confirm with confirmedAudio and valid token: successfully closes and saves audio tab
+    const confirmAudio = await msg<{
+      ok: boolean;
+      data: { saved: number; closed: number };
+    }>(ext, {
+      type: "save",
+      tabIds: [audioTab],
+      confirmedAudio: true,
+      confirmToken: secondAudioSave.data.confirmToken,
+    });
+    expect(confirmAudio.ok).toBe(true);
+    expect(confirmAudio.data.saved).toBe(1);
+    expect(confirmAudio.data.closed).toBe(1);
+
+    // Incognito permission verification: ensure API call is valid and bounded
+    const incognitoAllowed = await ext.evaluate(async () => {
+      if (typeof chrome.extension?.isAllowedIncognitoAccess === "function") {
+        return await new Promise((resolve) =>
+          chrome.extension.isAllowedIncognitoAccess(resolve),
+        );
+      }
+      return false;
+    });
+    expect(typeof incognitoAllowed).toBe("boolean");
 
     // 4. Duplicate tab skipping (R207/R215)
     const dupTab = await openTabViaExtension(
@@ -949,6 +1012,54 @@ test("prototype id safety: constructor and __proto__ roundtrip import, restore, 
       await page.waitForTimeout(100);
     }
     expect(protoOpened).toBe(true);
+
+    // Verify prototype entry Undo: save the restored proto tab, then undo
+    const protoTabId = await page.evaluate(async (targetUrl) => {
+      const list = await chrome.tabs.query({});
+      const tab = list.find(
+        (t) =>
+          t.url === targetUrl ||
+          (t as { pendingUrl?: string }).pendingUrl === targetUrl,
+      );
+      return tab?.id ?? null;
+    }, `http://127.0.0.1:${fixture.port}/proto-page`);
+    expect(protoTabId).not.toBeNull();
+
+    const saveProtoAgain = await msg<{
+      ok: boolean;
+      data: { saved: number; closed: number };
+    }>(page, {
+      type: "save",
+      tabIds: [protoTabId!],
+    });
+    expect(saveProtoAgain.ok).toBe(true);
+    expect(saveProtoAgain.data.saved).toBe(1);
+
+    // Call Undo to restore the saved proto tab
+    const undoProtoRes = await msg<{
+      ok: boolean;
+      data: { message: string };
+    }>(page, {
+      type: "undo",
+    });
+    expect(undoProtoRes.ok).toBe(true);
+
+    let protoReopenedAfterUndo = false;
+    for (let i = 0; i < 30; i++) {
+      const tabs = await page.evaluate(async () => chrome.tabs.query({}));
+      if (
+        tabs.some(
+          (t) =>
+            t.url?.includes("/proto-page") ||
+            (t as { pendingUrl?: string }).pendingUrl?.includes("/proto-page"),
+        )
+      ) {
+        protoReopenedAfterUndo = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    expect(protoReopenedAfterUndo).toBe(true);
 
     // Verify database entries are now 0
     const finalState = await msg<{

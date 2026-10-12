@@ -166,14 +166,14 @@ try {
       p95VsTarget:
         p95 <= 200
           ? `p95 (${p95}ms) meets 200ms target`
-          : `p95 (${p95}ms) exceeds 200ms target under sequential process spawn load`,
+          : `p95 (${p95}ms) exceeds 200ms target`,
       virtualize:
         entryCount >= 1000 && (fullMetrics.nodes ?? 0) > 5000
           ? "optional virtualization candidate for extreme libraries; current DOM handles 1000 items responsively"
           : "no virtualization needed in v1; 1000 items render cleanly",
     },
     chromeTaskManagerMemory:
-      "Automation cannot read native Chrome Task Manager tab memory directly; see docs/HANDS_ON_ONLY.md for manual verification steps.",
+      "Native Chrome Task Manager inspection and native popup measurement methods are documented with verification data in docs/HANDS_ON_ONLY.md and docs/KNOWN_LIMITATIONS.md.",
   };
 
   fs.writeFileSync(

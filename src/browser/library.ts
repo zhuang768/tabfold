@@ -11,6 +11,7 @@ import {
   type SavedTab,
   type ImportSummary,
   type RestoreMode,
+  type UndoState,
 } from "../types.js";
 import { STRINGS } from "../strings.js";
 import { createId, urlsEqual } from "../core/id.js";
@@ -198,6 +199,9 @@ async function clearConfirm(): Promise<void> {
 
 const RESTORE_JOURNAL_KEY = "tabfold_restore_journal";
 const UNDO_JOURNAL_KEY = "tabfold_undo_journal";
+const OPERATION_JOURNAL_KEY = "tabfold_op_journal";
+const DURABLE_UNDO_KEY = "tabfold_durable_undo";
+const INTENT_KEY = "tabfold_op_intent";
 
 const inMemoryJournals: Record<string, Record<string, number>> = Object.create(
   null,
@@ -223,7 +227,7 @@ async function getJournal(key: string): Promise<Record<string, number>> {
       const raw = data?.[key];
       if (typeof raw === "object" && raw !== null) {
         for (const id of Object.getOwnPropertyNames(raw)) {
-          const v = (raw as Record<string, unknown>)[id];
+          const v = Reflect.get(raw, id);
           if (typeof v === "number" && Number.isFinite(v) && v > 0) {
             result[id] = v;
           }
@@ -233,7 +237,40 @@ async function getJournal(key: string): Promise<Record<string, number>> {
   } catch {
     // best effort session read
   }
+  try {
+    const s = getStore();
+    const data = await s.getDriver().get([key, OPERATION_JOURNAL_KEY]);
+    const raw = data?.[key] ?? data?.[OPERATION_JOURNAL_KEY];
+    if (typeof raw === "object" && raw !== null) {
+      for (const id of Object.getOwnPropertyNames(raw)) {
+        const v = Reflect.get(raw, id);
+        if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+          result[id] = v;
+        }
+      }
+    }
+  } catch {
+    // best effort driver read
+  }
   return result;
+}
+
+function serializePlainDict(
+  current: Record<string, number>,
+): Record<string, number> {
+  const plain: Record<string, number> = {};
+  for (const k of Object.getOwnPropertyNames(current)) {
+    const v = Reflect.get(current, k);
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+      Object.defineProperty(plain, k, {
+        value: v,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return plain;
 }
 
 async function recordJournalEntry(
@@ -245,27 +282,38 @@ async function recordJournalEntry(
     inMemoryJournals[key] = createCleanDict();
   }
   inMemoryJournals[key][id] = tabId;
+  const current = await getJournal(key);
+  current[id] = tabId;
+  const plain = serializePlainDict(current);
+
   try {
-    if (typeof chrome === "undefined" || !chrome.storage?.session) return;
-    const current = await getJournal(key);
-    current[id] = tabId;
-    const plain: Record<string, number> = {};
-    for (const k of Object.getOwnPropertyNames(current)) {
-      if (typeof current[k] === "number") {
-        plain[k] = current[k];
-      }
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      await chrome.storage.session.set({ [key]: plain });
     }
-    await chrome.storage.session.set({ [key]: plain });
   } catch {
-    // in-memory journal retained
+    // session storage set failed
+  }
+
+  try {
+    const s = getStore();
+    await s.getDriver().set({ [key]: plain, [OPERATION_JOURNAL_KEY]: plain });
+  } catch {
+    // driver set failed
   }
 }
 
 async function clearJournal(key: string): Promise<void> {
   delete inMemoryJournals[key];
   try {
-    if (typeof chrome === "undefined" || !chrome.storage?.session) return;
-    await chrome.storage.session.remove(key);
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      await chrome.storage.session.remove(key);
+    }
+  } catch {
+    // best effort
+  }
+  try {
+    const s = getStore();
+    await s.getDriver().remove([key, OPERATION_JOURNAL_KEY]);
   } catch {
     // best effort
   }
@@ -276,10 +324,62 @@ function getJournalTabId(
   id: string,
 ): number | null {
   if (Object.prototype.hasOwnProperty.call(journal, id)) {
-    const v = journal[id];
+    const desc = Object.getOwnPropertyDescriptor(journal, id);
+    const v = desc?.value ?? Reflect.get(journal, id);
     if (typeof v === "number" && Number.isFinite(v) && v > 0) {
       return v;
     }
+  }
+  return null;
+}
+
+interface OperationIntent {
+  opId: string;
+  entryId: string;
+  url: string;
+  windowId?: number;
+  timestamp: number;
+}
+
+async function recordIntent(intent: OperationIntent): Promise<void> {
+  try {
+    const s = getStore();
+    await s.getDriver().set({ [INTENT_KEY]: intent });
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      await chrome.storage.session.set({ [INTENT_KEY]: intent });
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function clearIntent(): Promise<void> {
+  try {
+    const s = getStore();
+    await s.getDriver().remove([INTENT_KEY]);
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      await chrome.storage.session.remove([INTENT_KEY]);
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function getPendingIntent(): Promise<OperationIntent | null> {
+  try {
+    const s = getStore();
+    const data = await s.getDriver().get([INTENT_KEY]);
+    if (data[INTENT_KEY] && typeof data[INTENT_KEY] === "object") {
+      return data[INTENT_KEY] as OperationIntent;
+    }
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      const sess = await chrome.storage.session.get(INTENT_KEY);
+      if (sess[INTENT_KEY] && typeof sess[INTENT_KEY] === "object") {
+        return sess[INTENT_KEY] as OperationIntent;
+      }
+    }
+  } catch {
+    // best effort
   }
   return null;
 }
@@ -292,7 +392,7 @@ async function verifyTabAlive(
   try {
     const t = await chrome.tabs.get(tabId);
     if (!t) return false;
-    if (expectedUrl && t.url && t.url !== "about:blank") {
+    if (expectedUrl) {
       return t.url === expectedUrl || t.pendingUrl === expectedUrl;
     }
     return true;
@@ -665,10 +765,18 @@ export async function saveTabs(options: {
       if (t.id != null) entryByTabId.set(t.id, newEntries[i]!);
     });
 
+    const affectedWindowIds = new Set<number>();
+    if (anchorWindowId != null && anchorWindowId >= 0) {
+      affectedWindowIds.add(anchorWindowId);
+    }
+
     for (const t of candidates) {
       if (t.id == null) continue;
       try {
         const fresh = await chrome.tabs.get(t.id);
+        if (fresh.windowId != null && fresh.windowId >= 0) {
+          affectedWindowIds.add(fresh.windowId);
+        }
         const expected = snapshot.get(t.id);
         if ((fresh.url ?? "") !== expected) {
           failed.push({
@@ -739,44 +847,46 @@ export async function saveTabs(options: {
 
     let closed = 0;
     let statsWarning = false;
-    if (toClose.length && anchorWindowId != null) {
-      try {
-        await ensureWindowSurvives(anchorWindowId, toClose);
-      } catch {
+    if (toClose.length) {
+      for (const wId of affectedWindowIds) {
         try {
-          const cur = await s.readDatabaseUnlocked();
-          await s.writeDatabaseUnlocked(
-            {
-              ...cur,
-              entries: cur.entries.filter(
-                (e) => !newEntries.some((n) => n.id === e.id),
-              ),
-              undo: null,
-              stats: {
-                ...cur.stats,
-                totalSaved: Math.max(
-                  0,
-                  cur.stats.totalSaved - newEntries.length,
-                ),
-              },
-            },
-            cur.revision,
-          );
+          await ensureWindowSurvives(wId, toClose);
         } catch {
-          // best-effort rollback
+          try {
+            const cur = await s.readDatabaseUnlocked();
+            await s.writeDatabaseUnlocked(
+              {
+                ...cur,
+                entries: cur.entries.filter(
+                  (e) => !newEntries.some((n) => n.id === e.id),
+                ),
+                undo: null,
+                stats: {
+                  ...cur.stats,
+                  totalSaved: Math.max(
+                    0,
+                    cur.stats.totalSaved - newEntries.length,
+                  ),
+                },
+              },
+              cur.revision,
+            );
+          } catch {
+            // best-effort rollback
+          }
+          failed.push({
+            title: "Window",
+            url: "",
+            reason: "Could not keep window open",
+          });
+          return emptySave({
+            message: STRINGS.closeFailed,
+            skipped,
+            failed,
+            saved: 0,
+            closed: 0,
+          });
         }
-        failed.push({
-          title: "Window",
-          url: "",
-          reason: "Could not keep window open",
-        });
-        return emptySave({
-          message: STRINGS.closeFailed,
-          skipped,
-          failed,
-          saved: 0,
-          closed: 0,
-        });
       }
 
       const actuallyClosed: number[] = [];
@@ -800,6 +910,26 @@ export async function saveTabs(options: {
         .map((id) => entryByTabId.get(id)?.id)
         .filter((x): x is string => Boolean(x));
 
+      const closeTimestamp = Date.now();
+      const durableUndoState: UndoState | null = actuallyClosedEntryIds.length
+        ? {
+            ids: actuallyClosedEntryIds,
+            expiresAt: closeTimestamp + UNDO_TTL_MS,
+          }
+        : null;
+      if (durableUndoState) {
+        try {
+          await s.getDriver().set({ [DURABLE_UNDO_KEY]: durableUndoState });
+          if (typeof chrome !== "undefined" && chrome.storage?.session) {
+            await chrome.storage.session.set({
+              [DURABLE_UNDO_KEY]: durableUndoState,
+            });
+          }
+        } catch {
+          // best effort durable undo
+        }
+      }
+
       try {
         const cur = await s.readDatabaseUnlocked();
         await s.writeDatabaseUnlocked(
@@ -809,9 +939,7 @@ export async function saveTabs(options: {
               ...cur.stats,
               totalClosed: cur.stats.totalClosed + closed,
             },
-            undo: actuallyClosedEntryIds.length
-              ? { ids: actuallyClosedEntryIds, expiresAt: now + UNDO_TTL_MS }
-              : null,
+            undo: durableUndoState,
           },
           cur.revision,
         );
@@ -822,9 +950,7 @@ export async function saveTabs(options: {
           await s.writeDatabaseUnlocked(
             {
               ...cur2,
-              undo: actuallyClosedEntryIds.length
-                ? { ids: actuallyClosedEntryIds, expiresAt: now + UNDO_TTL_MS }
-                : null,
+              undo: durableUndoState,
             },
             cur2.revision,
           );
@@ -948,13 +1074,17 @@ export async function restoreEntries(
     let failed = 0;
     const openedIds: string[] = [];
     const journal = await getJournal(RESTORE_JOURNAL_KEY);
+    const undoJournal = await getJournal(UNDO_JOURNAL_KEY);
+    const pendingIntent = await getPendingIntent();
 
     for (let i = 0; i < ordered.length; i++) {
       const entry = ordered[i]!;
       if (batch && i > 0 && i % batchSize === 0) {
         await new Promise((r) => setTimeout(r, 400));
       }
-      const existingTabId = getJournalTabId(journal, entry.id);
+      const existingTabId =
+        getJournalTabId(journal, entry.id) ??
+        getJournalTabId(undoJournal, entry.id);
       if (
         existingTabId != null &&
         (await verifyTabAlive(existingTabId, entry.url))
@@ -963,14 +1093,46 @@ export async function restoreEntries(
         openedIds.push(entry.id);
         continue;
       }
-      const tab = await createTabSafe(entry, entry.source.windowId);
+
+      let adoptedTab: chrome.tabs.Tab | null = null;
+      if (
+        pendingIntent &&
+        pendingIntent.entryId === entry.id &&
+        pendingIntent.url === entry.url
+      ) {
+        if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+          const openTabs = await chrome.tabs.query({});
+          const match = openTabs.find(
+            (t) =>
+              (t.url === entry.url || t.pendingUrl === entry.url) &&
+              t.id != null,
+          );
+          if (match && match.id != null) {
+            adoptedTab = match;
+          }
+        }
+      }
+
+      let tab: chrome.tabs.Tab | null = adoptedTab;
+      if (!tab) {
+        await recordIntent({
+          opId: "restore",
+          entryId: entry.id,
+          url: entry.url,
+          windowId: entry.source.windowId,
+          timestamp: Date.now(),
+        });
+        tab = await createTabSafe(entry, entry.source.windowId);
+      }
       if (tab) {
         opened += 1;
         openedIds.push(entry.id);
         if (tab.id != null) {
           await recordJournalEntry(RESTORE_JOURNAL_KEY, entry.id, tab.id);
         }
+        await clearIntent();
       } else {
+        await clearIntent();
         failed += 1;
       }
     }
@@ -1041,17 +1203,58 @@ export async function undoLastSave(): Promise<{
   const s = getStore();
   return s.exclusive(async () => {
     const db = await s.readDatabaseUnlocked();
-    if (!db.undo || Date.now() > db.undo.expiresAt) {
+    let undoState = db.undo;
+    if (!undoState || Date.now() > undoState.expiresAt) {
+      try {
+        const durable = (await s.getDriver().get([DURABLE_UNDO_KEY]))[
+          DURABLE_UNDO_KEY
+        ] as UndoState | undefined;
+        if (
+          durable &&
+          typeof durable === "object" &&
+          Array.isArray(durable.ids) &&
+          durable.expiresAt > Date.now()
+        ) {
+          undoState = durable;
+        }
+      } catch {
+        // best effort
+      }
+      if (!undoState || Date.now() > undoState.expiresAt) {
+        try {
+          if (typeof chrome !== "undefined" && chrome.storage?.session) {
+            const sess = await chrome.storage.session.get(DURABLE_UNDO_KEY);
+            const durable = sess[DURABLE_UNDO_KEY] as UndoState | undefined;
+            if (
+              durable &&
+              typeof durable === "object" &&
+              Array.isArray(durable.ids) &&
+              durable.expiresAt > Date.now()
+            ) {
+              undoState = durable;
+            }
+          }
+        } catch {
+          // best effort
+        }
+      }
+    }
+    if (!undoState || Date.now() > undoState.expiresAt) {
       return { ok: false, message: STRINGS.undoExpired };
     }
-    const ids = [...db.undo.ids];
-    const expiresAt = db.undo.expiresAt;
+    const ids = [...undoState.ids];
+    const expiresAt = undoState.expiresAt;
     const entries = db.entries.filter((e) => ids.includes(e.id));
     const openedIds: string[] = [];
     const failedIds: string[] = [];
     const journal = await getJournal(UNDO_JOURNAL_KEY);
+    const restoreJournal = await getJournal(RESTORE_JOURNAL_KEY);
+    const pendingIntent = await getPendingIntent();
+
     for (const entry of entries) {
-      const existingTabId = getJournalTabId(journal, entry.id);
+      const existingTabId =
+        getJournalTabId(journal, entry.id) ??
+        getJournalTabId(restoreJournal, entry.id);
       if (
         existingTabId != null &&
         (await verifyTabAlive(existingTabId, entry.url))
@@ -1059,13 +1262,44 @@ export async function undoLastSave(): Promise<{
         openedIds.push(entry.id);
         continue;
       }
-      const tab = await createTabSafe(entry);
+
+      let adoptedTab: chrome.tabs.Tab | null = null;
+      if (
+        pendingIntent &&
+        pendingIntent.entryId === entry.id &&
+        pendingIntent.url === entry.url
+      ) {
+        if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+          const openTabs = await chrome.tabs.query({});
+          const match = openTabs.find(
+            (t) =>
+              (t.url === entry.url || t.pendingUrl === entry.url) &&
+              t.id != null,
+          );
+          if (match && match.id != null) {
+            adoptedTab = match;
+          }
+        }
+      }
+
+      let tab: chrome.tabs.Tab | null = adoptedTab;
+      if (!tab) {
+        await recordIntent({
+          opId: "undo",
+          entryId: entry.id,
+          url: entry.url,
+          timestamp: Date.now(),
+        });
+        tab = await createTabSafe(entry);
+      }
       if (tab) {
         openedIds.push(entry.id);
         if (tab.id != null) {
           await recordJournalEntry(UNDO_JOURNAL_KEY, entry.id, tab.id);
         }
+        await clearIntent();
       } else {
+        await clearIntent();
         failedIds.push(entry.id);
       }
     }
@@ -1081,6 +1315,16 @@ export async function undoLastSave(): Promise<{
       },
       cur.revision,
     );
+    await clearJournal(UNDO_JOURNAL_KEY);
+    await clearJournal(RESTORE_JOURNAL_KEY);
+    try {
+      await s.getDriver().remove([DURABLE_UNDO_KEY]);
+      if (typeof chrome !== "undefined" && chrome.storage?.session) {
+        await chrome.storage.session.remove([DURABLE_UNDO_KEY]);
+      }
+    } catch {
+      // best effort
+    }
     await clearJournal(UNDO_JOURNAL_KEY);
     await refreshBadgeFromDb();
     if (!openedIds.length) {
@@ -1128,27 +1372,9 @@ export async function handleRequest(req: Request): Promise<Response> {
         }
       }
       case "save": {
-        let scope: SaveScope = "current";
-        if (req.scope !== undefined) {
-          if (!isValidScope(req.scope)) {
-            return { ok: false, error: "Invalid save scope." };
-          }
-          scope = req.scope;
-        } else if (req.confirmToken) {
-          scope = "current";
-        } else {
-          try {
-            const db = await s.readDatabase();
-            scope = isValidScope(db.settings.defaultScope)
-              ? db.settings.defaultScope
-              : "current";
-          } catch {
-            scope = "current";
-          }
-        }
         if (
           req.tabId !== undefined &&
-          (typeof req.tabId !== "number" || !Number.isFinite(req.tabId))
+          (typeof req.tabId !== "number" || !Number.isInteger(req.tabId))
         ) {
           return { ok: false, error: STRINGS.missingTabId };
         }
@@ -1156,7 +1382,7 @@ export async function handleRequest(req: Request): Promise<Response> {
           req.tabIds !== undefined &&
           (!Array.isArray(req.tabIds) ||
             req.tabIds.some(
-              (t) => typeof t !== "number" || !Number.isFinite(t),
+              (t) => typeof t !== "number" || !Number.isInteger(t),
             ))
         ) {
           return { ok: false, error: "Invalid tabIds array." };
@@ -1178,6 +1404,24 @@ export async function handleRequest(req: Request): Promise<Response> {
           typeof req.confirmToken !== "string"
         ) {
           return { ok: false, error: "confirmToken must be a string." };
+        }
+        let scope: SaveScope = "current";
+        if (req.scope !== undefined) {
+          if (!isValidScope(req.scope)) {
+            return { ok: false, error: "Invalid save scope." };
+          }
+          scope = req.scope;
+        } else if (req.confirmToken) {
+          scope = "current";
+        } else {
+          try {
+            const db = await s.readDatabase();
+            scope = isValidScope(db.settings.defaultScope)
+              ? db.settings.defaultScope
+              : "current";
+          } catch {
+            scope = "current";
+          }
         }
         const saveOpts: Parameters<typeof saveTabs>[0] = { scope };
         if (req.tabId != null) saveOpts.tabId = req.tabId;
@@ -1332,13 +1576,13 @@ export async function handleRequest(req: Request): Promise<Response> {
         if (patch.restoreBatchSize !== undefined) {
           if (
             typeof patch.restoreBatchSize !== "number" ||
-            !Number.isFinite(patch.restoreBatchSize) ||
+            !Number.isInteger(patch.restoreBatchSize) ||
             patch.restoreBatchSize < 1 ||
             patch.restoreBatchSize > 500
           ) {
             return {
               ok: false,
-              error: "restoreBatchSize must be a number between 1 and 500.",
+              error: STRINGS.invalidBatchSize,
             };
           }
         }
@@ -1355,6 +1599,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       case "edit-entry": {
         if (
           typeof req.id !== "string" ||
+          !req.id.trim() ||
           typeof req.group !== "string" ||
           !Array.isArray(req.tags) ||
           req.tags.some((t) => typeof t !== "string")
@@ -1370,6 +1615,9 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { saved: true } };
       }
       case "import-json": {
+        if (typeof req.text !== "string") {
+          return { ok: false, error: "text must be a string." };
+        }
         let summary: ImportSummary = {
           added: 0,
           skippedDuplicates: 0,
@@ -1400,6 +1648,9 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { summary } };
       }
       case "import-text": {
+        if (typeof req.text !== "string") {
+          return { ok: false, error: "text must be a string." };
+        }
         let summary: ImportSummary = {
           added: 0,
           skippedDuplicates: 0,
@@ -1436,6 +1687,9 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { backups: await s.listBackupMeta() } };
       }
       case "restore-backup": {
+        if (typeof req.id !== "string" || !req.id.trim()) {
+          return { ok: false, error: "Invalid backup id." };
+        }
         await s.restoreBackup(req.id);
         await refreshBadgeFromDb();
         return { ok: true, data: { restored: true } };

@@ -27,14 +27,18 @@ function showStatus(
 }
 
 let isLoaded = false;
+let loadGeneration = 0;
 
 async function load(): Promise<void> {
+  const gen = ++loadGeneration;
   const res = await send<{
     database: Database | null;
     backups: BackupMeta[];
     corrupt?: boolean;
     message?: string;
   }>({ type: "get-state" });
+
+  if (gen !== loadGeneration) return;
 
   if (!res.ok) {
     isLoaded = false;

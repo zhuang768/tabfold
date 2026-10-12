@@ -55,20 +55,32 @@ function parseUndo(
   now: number,
   strictCurrent = false,
 ): UndoState | null {
-  if (raw == null) return null;
+  if (raw === undefined) {
+    if (strictCurrent)
+      throw new CorruptDatabaseError("missing undo field", raw);
+    return null;
+  }
+  if (raw === null) return null;
   if (!isRecord(raw)) {
     if (strictCurrent) throw new CorruptDatabaseError("undo not object", raw);
     return null;
   }
-  if (!Array.isArray(raw.ids) || typeof raw.expiresAt !== "number") {
+  if (
+    !Array.isArray(raw.ids) ||
+    typeof raw.expiresAt !== "number" ||
+    !Number.isFinite(raw.expiresAt)
+  ) {
     if (strictCurrent)
       throw new CorruptDatabaseError("invalid undo structure", raw);
     return null;
   }
   if (strictCurrent) {
     for (const x of raw.ids) {
-      if (typeof x !== "string" || x.length === 0) {
-        throw new CorruptDatabaseError("undo ids contains non-string", raw);
+      if (typeof x !== "string" || x.length === 0 || x !== x.trim()) {
+        throw new CorruptDatabaseError(
+          "undo ids contains non-string or whitespace",
+          raw,
+        );
       }
     }
   }
@@ -103,7 +115,13 @@ function migrateEntryStrict(
     return { invalid: true, reason: "missing entry schemaVersion" };
   }
 
-  const url = asString(raw.url).trim();
+  if (typeof raw.url !== "string") {
+    return { invalid: true, reason: "url must be a string" };
+  }
+  if (opts.strictCurrent && (raw.url !== raw.url.trim() || !raw.url)) {
+    return { invalid: true, reason: "url contains whitespace or is empty" };
+  }
+  const url = raw.url.trim();
   if (!url || !isAllowedPersistUrl(url)) {
     return { invalid: true, reason: `invalid url: ${url || "(empty)"}` };
   }
@@ -127,6 +145,12 @@ function migrateEntryStrict(
     return { invalid: true, reason: "missing savedAt" };
   }
   const savedAt = raw.savedAt;
+
+  if (opts.strictCurrent) {
+    if (typeof raw.id !== "string" || raw.id !== raw.id.trim() || !raw.id) {
+      return { invalid: true, reason: "id contains whitespace or is empty" };
+    }
+  }
 
   let id = asString(raw.id).trim();
   if (!id) {
@@ -238,10 +262,13 @@ function migrateEntryStrict(
 }
 
 export function migrateSettings(raw: unknown, strictCurrent = false): Settings {
-  if (!isRecord(raw)) return { ...DEFAULT_SETTINGS, whitelist: [] };
+  if (!isRecord(raw)) {
+    if (strictCurrent)
+      throw new CorruptDatabaseError("settings not object", raw);
+    return { ...DEFAULT_SETTINGS, whitelist: [] };
+  }
   if (strictCurrent) {
     if (
-      raw.theme !== undefined &&
       raw.theme !== "light" &&
       raw.theme !== "dark" &&
       raw.theme !== "system"
@@ -252,7 +279,6 @@ export function migrateSettings(raw: unknown, strictCurrent = false): Settings {
       );
     }
     if (
-      raw.defaultScope !== undefined &&
       raw.defaultScope !== "current" &&
       raw.defaultScope !== "others" &&
       raw.defaultScope !== "window"
@@ -263,41 +289,30 @@ export function migrateSettings(raw: unknown, strictCurrent = false): Settings {
       );
     }
     if (
-      raw.whitelist !== undefined &&
-      (!Array.isArray(raw.whitelist) ||
-        raw.whitelist.some((h) => typeof h !== "string"))
+      !Array.isArray(raw.whitelist) ||
+      raw.whitelist.some((h) => typeof h !== "string")
     ) {
       throw new CorruptDatabaseError("whitelist must be string array", raw);
     }
-    if (
-      raw.removeAfterRestore !== undefined &&
-      typeof raw.removeAfterRestore !== "boolean"
-    ) {
+    if (typeof raw.removeAfterRestore !== "boolean") {
       throw new CorruptDatabaseError("removeAfterRestore must be boolean", raw);
     }
-    if (
-      raw.onboardingComplete !== undefined &&
-      typeof raw.onboardingComplete !== "boolean"
-    ) {
+    if (typeof raw.onboardingComplete !== "boolean") {
       throw new CorruptDatabaseError("onboardingComplete must be boolean", raw);
     }
-    if (
-      raw.unsavedHintAcknowledged !== undefined &&
-      typeof raw.unsavedHintAcknowledged !== "boolean"
-    ) {
+    if (typeof raw.unsavedHintAcknowledged !== "boolean") {
       throw new CorruptDatabaseError(
         "unsavedHintAcknowledged must be boolean",
         raw,
       );
     }
     if (
-      raw.restoreBatchSize !== undefined &&
-      (typeof raw.restoreBatchSize !== "number" ||
-        !Number.isFinite(raw.restoreBatchSize) ||
-        raw.restoreBatchSize < 1)
+      typeof raw.restoreBatchSize !== "number" ||
+      !Number.isInteger(raw.restoreBatchSize) ||
+      raw.restoreBatchSize < 1
     ) {
       throw new CorruptDatabaseError(
-        "restoreBatchSize must be number >= 1",
+        "restoreBatchSize must be integer >= 1",
         raw,
       );
     }
@@ -337,6 +352,7 @@ function migrateStats(
   strictCurrent = false,
 ): Database["stats"] {
   if (!isRecord(raw)) {
+    if (strictCurrent) throw new CorruptDatabaseError("stats not object", raw);
     return { ...DEFAULT_STATS, totalSaved: entryCount };
   }
   if (strictCurrent) {
@@ -346,11 +362,9 @@ function migrateStats(
       "totalClosed",
       "totalImported",
     ] as const) {
-      if (raw[key] !== undefined) {
-        const v = raw[key];
-        if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
-          throw new CorruptDatabaseError(`stats.${key} must be a number`, raw);
-        }
+      const v = raw[key];
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+        throw new CorruptDatabaseError(`stats.${key} must be a number`, raw);
       }
     }
   }
@@ -431,7 +445,13 @@ export function migrateDatabase(
       const savedAt = asNumber(t.savedAt, 0);
       let id = asString(t.id).trim() || stableMigratedId(url, savedAt, title);
       if (seenV1Ids.has(id)) {
-        id = `${id}_v1dup_${i}`;
+        let counter = i;
+        let candidate = `${id}_v1dup_${counter}`;
+        while (seenV1Ids.has(candidate)) {
+          counter++;
+          candidate = `${id}_v1dup_${counter}`;
+        }
+        id = candidate;
       }
       seenV1Ids.add(id);
       const sourceRaw = isRecord(t.source) ? t.source : {};
@@ -498,7 +518,19 @@ export function migrateDatabase(
     entries.push(r.entry);
   }
 
-  const strictCurrent = opts.strictCurrent ?? version === SCHEMA_VERSION;
+  const strictCurrent = Boolean(opts.strictCurrent);
+  if (strictCurrent) {
+    if (
+      typeof raw.revision !== "number" ||
+      !Number.isInteger(raw.revision) ||
+      raw.revision < 0
+    ) {
+      throw new CorruptDatabaseError(
+        "revision must be non-negative integer",
+        raw,
+      );
+    }
+  }
   const undo = parseUndo(raw.undo, now, strictCurrent);
   if (isRecord(raw.undo) && !undo && Array.isArray(raw.undo.ids)) {
     warnings.push("undo expired or invalid — cleared");

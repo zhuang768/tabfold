@@ -36,6 +36,7 @@ export const STRINGS = {
   restoreAllAtOnce: "Open all at once",
   edit: "Edit",
   ok: "OK",
+  restoring: "Restoring...",
   hibernatedSuffix: " (hibernated)",
   noInactiveTabs: "No inactive background tabs available to hibernate.",
   activeCannotHibernate:
@@ -210,7 +211,17 @@ export const STRINGS = {
   faviconAlt: "Site icon",
   statusRegion: "Status messages",
   confirmDialogLabel: "Confirmation",
-  editDialogLabel: "Edit saved tab",
+  invalidTabIds: "Invalid tabIds array.",
+  confirmedAudioBoolean: "confirmedAudio must be a boolean.",
+  confirmedUnsavedBoolean: "confirmedUnsaved must be a boolean.",
+  confirmTokenString: "confirmToken must be a string.",
+  groupMustBeString: "group must be a string.",
+  textMustBeString: "text must be a string.",
+  backupNotFound: "Backup not found.",
+  backupNotUsable: "Backup is not usable.",
+  backupContentMismatch: "Restored database content mismatch.",
+  migratedContentMismatch: "Migrated database content mismatch on read-back.",
+  readbackMismatch: "Read-back content mismatch.",
   actionDefaultTitle: "Save current tab with Tabfold",
 } as const;
 

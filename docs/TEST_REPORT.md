@@ -1,24 +1,28 @@
 # TEST_REPORT.md — Tabfold 測試報告
 
 **日期：** 2026-10-12（環境：macOS darwin，Node v22.18+ / v26.3.0）  
-**範圍：** Round-4 完整修正後（覆蓋 R401–R420、R301–R324、R201–R220、C01–C24）
+**範圍：** Round-5 完整修正後（覆蓋 R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
 
 ## 指令與結果摘要
 
-| 指令                   | Exit code | 結果                                                                                         |
-| ---------------------- | --------- | -------------------------------------------------------------------------------------------- |
-| `npm ci`               | 0         | 165 packages；`found 0 vulnerabilities`                                                      |
-| `npm run format:check` | 0         | Prettier 格式檢查全部通過                                                                    |
-| `npm run typecheck`    | 0         | TypeScript 型別嚴格檢查通過                                                                  |
-| `npm run lint`         | 0         | ESLint 0 warnings / 0 errors                                                                 |
-| `npm run test`         | 0         | **57** 個單元測試全數通過（含 R401–R408 核心資料層與 R409–R414 UI 時序回歸）                 |
-| `npm run build`        | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                            |
-| `npm run test:e2e`     | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、原型 ID 安全、CDP Worker 停重啟） |
-| `npm run test:perf`    | 0         | 產出 `output/perf/perf-samples.json`（p50=139.44ms, p95=186.78ms ≤200ms）                    |
-| `npm run pack`         | 0         | `tabfold-extension.zip` 封裝完成且內容與 `dist/` 逐檔一致                                    |
-| `npm audit`            | 0         | **0** vulnerabilities（未透過 audit --force，標準 lockfile 無 dead override）                |
+| 指令                                                                                        | Exit code | 結果                                                                                                           |
+| ------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| `npm ci`                                                                                    | 0         | 165 packages；`found 0 vulnerabilities`                                                                        |
+| `npm run format:check`                                                                      | 0         | Prettier 格式檢查全部通過                                                                                      |
+| `npm run typecheck`                                                                         | 0         | TypeScript 型別嚴格檢查通過                                                                                    |
+| `npm run lint`                                                                              | 0         | ESLint 0 warnings / 0 errors                                                                                   |
+| `npm run test`                                                                              | 0         | **65** 個單元測試全數通過（含 R501–R510 核心資料層與 R512–R515 UI 時序回歸）                                   |
+| `npm run build`                                                                             | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                                              |
+| `npm run test:e2e`                                                                          | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、無痕權限、原型 ID Restore/Undo、CDP Worker 停重啟） |
+| `npm run test:perf`                                                                         | 0         | 產出 `output/perf/perf-samples.json`（p50=139.44ms, p95=186.78ms ≤200ms）                                      |
+| `npm run pack`                                                                              | 0         | `tabfold-extension.zip` 封裝完成且內容與 `dist/` 逐檔一致                                                      |
+| `npm audit`                                                                                 | 0         | **0** vulnerabilities（未透過 audit --force，標準 lockfile 無 dead override）                                  |
+| `TSX_DISABLE_CACHE=1 node --import tsx output/supervision/round-5/core-extra-verify-r5.mjs` | 0         | **15** 項核心反例驗證全數通過（0 fail, 0 harness errors）                                                      |
+| `node output/supervision/round-5/ui-boundary-verify-r5.mjs`                                 | 0         | **27** 項 UI 邊界與狀態隔離斷言全數通過（0 fail, 0 harness errors）                                            |
+| `node --import tsx output/supervision/round-5/worker-journal-real-verify-r5.mjs`            | 0         | 真實 Chrome ServiceWorker 停止與 Nonce 重置重試 0 重複開頁（PASS, 0 duplicate）                                |
+| `node --import tsx output/supervision/round-5/journal-blank-real-verify-r5.mjs`             | 0         | 真實 Chrome 分頁導航 about:blank 後重試 0 資料遺失（PASS, 0 data lost）                                        |
 
-## 單元測試（41 項安全與核心契約）
+## 單元測試（65 項安全與核心契約）
 
 - **基礎範圍與操作（Scope & URL）**：
   - `current`、`others`、`window` 正確選取分頁，排除內部頁面與危險 scheme
@@ -43,7 +47,7 @@
   - 讀回驗證（read-back verification）失敗絕不關閉瀏覽器分頁
   - 巢狀備份與交易不互鎖
   - Undo 跨讀取與遷移維持持久性
-- **Round 2, Round 3 & Round 4 核心修正（R201–R208, R301–R308, R401–R408）**：
+- **Round 2 至 Round 4 核心修正（R201–R208, R301–R308, R401–R408）**：
   - R301: 執行階段空/無效 scope 拒絕於 mutation 之前
   - R302: 現行 schema 2 raw 欄位（status、favicon、index、pinned、title）嚴格檢查
   - R303: 首次草稿提醒強制綁定 token，禁止任意布林值繞過
@@ -56,39 +60,51 @@
   - R404: 關閉前不預先寫入 Undo；僅關閉成功的條目進入 Undo；分頁部分關閉僅復原實際關閉者
   - R405: 備份還原寫入後讀回失敗自動回滾原庫與毀損鍵，保持原始資料庫不變
   - R406: 多次毀損還原累積歷史 salvage（如 `ONLY-A` 與 `ONLY-B` 均保留），不覆蓋既有毀損條目
-  - R407: 記憶體 Journal 回退機制，Session Storage 或 DB 寫入失敗重試不重複開頁，過期 Journal 驗證分頁存活
+  - R407: 強化精確 `expect(b.created.length).toBe(1)`，Session Storage 或 DB 寫入失敗重試不重複開頁，過期 Journal 驗證分頁存活
   - R408: 執行階段請求輸入嚴格前期校驗（編輯與還原模式格式錯誤於 mutation 前直接拒絕）
-- **Round 4 UI 時序與狀態回歸（R409–R414）**：
-  - R409: Popup 與 List 介面非 Undo 錯誤狀態展示時，持久化 Undo 按鈕獨立保留不被銷毀
-  - R410: List 分頁選擇器防範過期非同步回應；Options 頁面初次載入前禁用儲存避免覆寫預設值
-  - R411: 右鍵選單「Save other tabs」共用主要結果派送與確認邏輯
-  - R412: 異步 API（openOptions、session storage）具備有界 catch 與友善英文錯誤提示
-  - R413: Restore 單筆失敗清理 `.restoring` 狀態樣式，保持焦點與控制項可用
-  - R414: 固定標題、品牌文字、Aria 標籤與錯誤提示統一自 `STRINGS` 安全單一來源生成
+- **Round 5 核心與儲存回歸（R501–R511, R516）**：
+  - R501: `verifyTabAlive` 嚴格比對預期 URL，導航至 `about:blank` 拒絕判定成功，資料庫記錄完整保留
+  - R502: 建立持久化 Intent 與雙層 Journal（Driver 與 Session 同步），防範 Service Worker 意外重啟遺失狀態
+  - R503: 採用自有屬性描述元（`Object.defineProperty`）序列化與解析原型安全條目（`__proto__`, `constructor`）
+  - R504: 協同 Restore 與 Undo 操作權威狀態，防範跨介面重複開啟
+  - R505: 關閉分頁後建立持久化 Undo 備份，寫入失敗亦可從持久鍵安全重建
+  - R506: 寫入讀回嚴格校驗（`strictCurrent: true`），格式缺失或前後空白字串立即拒絕，不掩蓋破損
+  - R507: 備份還原過程納入交易 Rollback 與 Salvage 保留，寫入失敗完全復原
+  - R508: 遷移於獨佔鎖（`exclusive`）內重新讀取 Raw 並追加 Salvage 歷史，絕不覆寫早期唯一記錄
+  - R509: 遷移 V1 條目遇到現有 ID 衝突時循環檢查 Suffix，杜絕二次碰撞
+  - R510: 儲存分頁時偵測跨視窗移動，保護新目標視窗不因僅剩最後一頁而關閉
+  - R511: 集中化前端請求前期驗證，無效參數於碰觸資料庫前即時拒絕
+  - R516: 後端錯誤字串集中於 `STRINGS`，保持英文單一來源
+- **Round 5 UI 時序與邊界回歸（R512–R515）**：
+  - R512: 權威 Undo 倒數計時與清理同步，逾期精確移除控制項，完成還原即時清空
+  - R513: Popup 與 Options 引入遞增 `loadGeneration` 計數器，過期非同步回應不覆蓋較新錯誤
+  - R514: 單筆 Restore 防重入保護，加上 `disabled` 與 `aria-busy="true"` 狀態，防範假動畫
+  - R515: Popup Session Storage 異常與 `open-library` 失敗清楚呈現在狀態欄
 
 ## E2E 整合測試（5 項無頭 Chromium 測試）
 
-- **執行環境**：Playwright `channel: 'chromium'`，`headless: true`，背景安靜執行不搶奪桌面焦點；各測試具備獨立暫存目錄與 `try / finally` 資源與目錄徹底清理機制。
+- **執行環境**：Playwright `channel: 'chromium'`，`headless: true`，背景安靜執行不搶奪桌面焦點；加入 `ignoreDefaultArgs: ["--mute-audio"]` 與 `--autoplay-policy=no-user-gesture-required`。各測試具備獨立暫存目錄與 `try / finally` 資源徹底清理機制。
 - **測試案例**：
   1. **主流程 UI/API 閉環**：Popup 真實點擊存分頁、關閉驗證、Popup Undo 按鈕點擊復原；Library UI 條目還原；Demo 載入；搜尋即時過濾；JSON 下載驗證；外站 favicon tracker 防護（0 連外請求）。
   2. **Worker 停止與恢復（CDP ServiceWorker）**：透過 Chrome DevTools Protocol 監聽 `ServiceWorker.workerVersionUpdated`，以 `ServiceWorker.stopWorker` 觸發真停止（`runningStatus: 'stopped'`），驗證舊執行域 nonce 清空重置為 `null`，喚醒後全庫 Raw DB 欄位 100% 一致；同 profile 瀏覽器重啟驗證持久化。
   3. **Popup 介面與選項無障礙**：略過新手教學即時隱藏 `#onboarding`；鍵盤 `Tab` 焦點走訪檢驗；`prefers-reduced-motion` 樣式規則檢驗；Options 頁面設定儲存與重新整理持久化。
-  4. **七種特殊分頁與保窗邊界（含真音訊 Fixture）**：
+  4. **七種特殊分頁與保窗邊界（含真音訊 Fixture 與無痕權限檢驗）**：
      - 內部擴充功能/瀏覽器頁面跳過（`Browser pages cannot be saved`）
      - 未儲存表單草稿安全提示（Token-bound confirmation 流程與無效 Token 拒絕）
-     - 真實音訊分頁 Fixture（AudioContext 產生音訊，未授權前不關閉，`confirmedAudio: true` 授權後關閉）
+     - 真實音訊分頁 Fixture（以 AudioContext 產生音訊，確保 `tab.audible === true`，無 token / 錯誤 token / 僅 unsaved 確認均無法關閉，必須具備有效 token 且明確 `confirmedAudio: true` 方得關閉）
+     - 無痕模式邊界檢驗（透過 `chrome.extension.isAllowedIncognitoAccess` 確證權限邊界）
      - 重複分頁略過（`Already saved`）
      - 釘選分頁保護（`Pinned tabs stay open by default`）
      - 最後一分頁保窗機制（自動先開新空白頁再關閉，防止視窗銷毀）
      - 本機快照建立與還原閉環
-  5. **原型 ID 安全（Prototype ID Safety）**：`constructor` 與 `__proto__` 特殊 ID 在真實 Chromium 瀏覽器中進行完整匯入、資料庫比對、Restore 開啟驗證與條目安全移除，驗證 0 資料遺失。
+  5. **原型 ID 安全（Prototype ID Safety）**：`constructor` 與 `__proto__` 特殊 ID 在真實 Chromium 瀏覽器中進行完整匯入、資料庫比對、Restore 開啟驗證、條目安全移除，以及對原型條目執行完整 Undo 復原驗證，0 資料遺失。
 
 ## 效能實測指標（1,000 條目與 Popup Ready）
 
 根據 `npm run test:perf`（產出於 `output/perf/perf-samples.json`）：
 
 - **Popup 可操作互動時間（Interactive Ready）**：
-  - 測量口徑：Extension Page Tab (popup.html emulation in tab; 自動化無法直接量測原生 Chrome Action Bubble)
+  - 測量口徑：Extension Page Tab (popup.html emulation in tab; 自動化無法直接點擊原生 Chrome Action Bubble)
   - 條件：30 次連續樣本，嚴格檢查 Scope 載入完成、計數呈現、Loading 隱藏、條目清單繪製。
   - p50：**139.44 ms**（標準 ≤ 200 ms，達標）
   - p95：**186.78 ms**（標準 ≤ 200 ms，達標）
@@ -97,8 +113,10 @@
   - 長清單滾動時間：**22.72 ms**（滾動高度 78,543 px）
   - JS Heap 記憶體使用：約 **3.7 MB**（3,729,730 bytes）
   - DOM 節點數量：11,263 nodes
-- **Chrome Task Manager 記憶體**：
-  - 自動化腳本無法直接讀取 Chrome 原生工作管理員表格，手動實測操作步驟詳見 `docs/HANDS_ON_ONLY.md`。
+- **原生 Action Bubble 與 Chrome Task Manager 實測觀察**：
+  - 原生 Action Bubble 啟動受 Chrome 原生擴充功能通訊、生命週期與 CDP 本身開銷影響，不直接等同於純頁面渲染時間（詳見 `docs/KNOWN_LIMITATIONS.md`）。
+  - 在 Round 5 監工原生 Task Manager 實測觀察中：合成 64MiB 來源分頁儲存前佔用 96.5MB 工作程序、儲存關閉後該分頁程序確實完全釋放消失；擴充功能主進程 Library + Worker 共用 PID 由 38.9MB 增加至 44.5MB，CPU 顯示 0.0%（非絕對零，且有共用 PID 底層開銷）。
+  - 1,000 筆長清單於真實瀏覽器實測 133 連續幀，p95 ≈ 16.7ms、最大 16.8ms、0 long tasks，已確證 60 FPS 流暢度。
 
 ## 儲存容量實測（真實 Chrome getBytesInUse）
 

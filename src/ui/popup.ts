@@ -19,6 +19,7 @@ let database: Database | null = null;
 let query = "";
 let undoTimer: number | null = null;
 let reloadTimer: number | null = null;
+let loadGeneration = 0;
 
 function showStatus(
   message: string,
@@ -35,20 +36,16 @@ function showStatus(
   el.append(span);
 
   const activeUndoIds =
-    undoIds.length > 0
-      ? undoIds
-      : database?.undo &&
-          database.undo.expiresAt > Date.now() &&
-          database.undo.ids.length > 0
-        ? database.undo.ids
-        : [];
+    database?.undo &&
+    database.undo.expiresAt > Date.now() &&
+    database.undo.ids.length > 0
+      ? database.undo.ids
+      : undoIds;
 
   const actualTtl =
-    undoIds.length > 0
-      ? ttlMs
-      : database?.undo
-        ? Math.max(0, database.undo.expiresAt - Date.now())
-        : ttlMs;
+    database?.undo && database.undo.expiresAt > Date.now()
+      ? Math.max(0, database.undo.expiresAt - Date.now())
+      : ttlMs;
 
   if (activeUndoIds.length && actualTtl > 0) {
     const btn = document.createElement("button");
@@ -60,7 +57,13 @@ function showStatus(
     if (undoTimer) window.clearTimeout(undoTimer);
     undoTimer = window.setTimeout(() => {
       btn.remove();
+      undoTimer = null;
     }, actualTtl);
+  } else {
+    if (undoTimer) {
+      window.clearTimeout(undoTimer);
+      undoTimer = null;
+    }
   }
 }
 
@@ -171,6 +174,7 @@ function renderList(entries: SavedTab[]): void {
     restore.className = "btn-restore";
     restore.textContent = STRINGS.restore;
     restore.addEventListener("click", () => {
+      if (isRestoring) return;
       row.classList.add("restoring");
       void restoreOne(entry.id);
     });
@@ -193,6 +197,14 @@ let isRestoring = false;
 async function restoreOne(id: string): Promise<void> {
   if (isRestoring) return;
   isRestoring = true;
+  const restoreButtons = document.querySelectorAll
+    ? document.querySelectorAll(".btn-restore")
+    : [];
+  for (const b of restoreButtons) {
+    (b as HTMLButtonElement).disabled = true;
+    (b as HTMLElement).setAttribute("aria-busy", "true");
+  }
+  showStatus(STRINGS.restoring ?? "Restoring...", "ok");
   try {
     const res = await send<{ message: string }>({
       type: "restore",
@@ -204,6 +216,10 @@ async function restoreOne(id: string): Promise<void> {
     await load();
   } finally {
     isRestoring = false;
+    for (const b of restoreButtons) {
+      (b as HTMLButtonElement).disabled = false;
+      (b as HTMLElement).removeAttribute("aria-busy");
+    }
   }
 }
 
@@ -255,6 +271,7 @@ async function batchDialog(
 }
 
 async function load(): Promise<void> {
+  const gen = ++loadGeneration;
   const list = $("list");
   list.replaceChildren();
   const loading = document.createElement("div");
@@ -267,6 +284,8 @@ async function load(): Promise<void> {
     corrupt?: boolean;
     message?: string;
   }>({ type: "get-state" });
+
+  if (gen !== loadGeneration) return;
 
   if (!res.ok) {
     database = null;
@@ -332,33 +351,50 @@ async function load(): Promise<void> {
   );
 
   const statusEl = $("status");
-  const hasExistingStatus =
-    !statusEl.hidden &&
-    (statusEl.textContent.trim().length > 0 || statusEl.children.length > 0);
+  const existingBtn =
+    statusEl.querySelector?.("#btn-undo") ??
+    (statusEl.querySelectorAll ? statusEl.querySelectorAll("button")[0] : null);
+
   if (
-    database.undo &&
-    database.undo.expiresAt > Date.now() &&
-    database.undo.ids.length > 0
+    !database.undo ||
+    database.undo.expiresAt <= Date.now() ||
+    !database.undo.ids.length
   ) {
-    const count = database.undo.ids.length;
-    const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
+    if (existingBtn) existingBtn.remove();
+    if (undoTimer) {
+      window.clearTimeout(undoTimer);
+      undoTimer = null;
+    }
+  } else {
     const remainingMs = Math.max(0, database.undo.expiresAt - Date.now());
-    if (!hasExistingStatus) {
-      showStatus(msg, "ok", database.undo.ids, remainingMs);
-    } else if (
-      typeof statusEl.querySelectorAll === "function" &&
-      statusEl.querySelectorAll("button").length === 0
-    ) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.id = "btn-undo";
-      btn.textContent = STRINGS.undo;
-      btn.addEventListener("click", () => void doUndo());
-      statusEl.append(btn);
+    if (existingBtn) {
       if (undoTimer) window.clearTimeout(undoTimer);
       undoTimer = window.setTimeout(() => {
-        btn.remove();
+        existingBtn.remove();
+        undoTimer = null;
       }, remainingMs);
+    } else {
+      const hasExistingStatus =
+        !statusEl.hidden &&
+        (statusEl.textContent.trim().length > 0 ||
+          statusEl.children.length > 0);
+      const count = database.undo.ids.length;
+      const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
+      if (!hasExistingStatus) {
+        showStatus(msg, "ok", database.undo.ids, remainingMs);
+      } else {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.id = "btn-undo";
+        btn.textContent = STRINGS.undo;
+        btn.addEventListener("click", () => void doUndo());
+        statusEl.append(btn);
+        if (undoTimer) window.clearTimeout(undoTimer);
+        undoTimer = window.setTimeout(() => {
+          btn.remove();
+          undoTimer = null;
+        }, remainingMs);
+      }
     }
   }
 }
@@ -474,10 +510,12 @@ async function init(): Promise<void> {
     }
     showStatus(STRINGS.pickWebTab, "warn");
   });
-  $("btn-library").addEventListener(
-    "click",
-    () => void send({ type: "open-library" }),
-  );
+  $("btn-library").addEventListener("click", async () => {
+    const res = await send({ type: "open-library" });
+    if (!res.ok) {
+      showStatus(res.error, "danger");
+    }
+  });
   $("btn-settings").addEventListener("click", () => {
     chrome.runtime.openOptionsPage().catch((err: unknown) => {
       showStatus(
@@ -503,8 +541,11 @@ async function init(): Promise<void> {
         "pendingAudioConfirm",
       ]);
     }
-  } catch {
-    // Session read error non-fatal
+  } catch (e) {
+    showStatus(
+      `Session storage warning: ${e instanceof Error ? e.message : String(e)}`,
+      "warn",
+    );
   }
   $("btn-export").addEventListener("click", async () => {
     const res = await send<{ text: string }>({ type: "export-json" });

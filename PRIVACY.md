@@ -1,6 +1,6 @@
 # Privacy Policy — Tabfold
 
-**Last updated:** 2026-10-06
+**Last updated:** 2026-10-12
 
 Tabfold is a browser extension that stores tab information **only on your device**.
 
@@ -20,7 +20,12 @@ Tabfold is a browser extension that stores tab information **only on your device
 
 ## Where data lives
 
-Data is stored with Chrome’s `chrome.storage.local` API in your browser profile. Uninstalling the extension removes this data. You can export or delete data from Settings at any time.
+Data is stored locally on your device using Chrome extension APIs:
+
+- **`chrome.storage.local`**: Stores your persistent saved tabs database, settings, lifetime statistics, and rolling local backup snapshots. Uninstalling the extension removes this data. You can export or delete data from Settings at any time.
+- **`chrome.storage.session`**: Stores transient in-flight restore journals and operation confirmation tokens to coordinate state during tab operations and prevent duplicate openings if the background worker sleeps. This data lives only in memory/session storage and is automatically cleared upon operation completion or browser restart.
+
+Neither storage medium transmits any data over the network; all data remains strictly within your browser profile on your local device.
 
 ## Contact
 

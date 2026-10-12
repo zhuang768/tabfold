@@ -199,6 +199,10 @@ export class LibraryStore {
     this.driver = driver;
   }
 
+  getDriver(): StorageDriver {
+    return this.driver;
+  }
+
   static failing(driver: StorageDriver): LibraryStore {
     const s = new LibraryStore(driver);
     s.failWrites = true;
@@ -253,29 +257,35 @@ export class LibraryStore {
       if (result.didMigrate) {
         // Persist migration under exclusive lock so ids stay stable
         await this.exclusive(async () => {
-          const again = await this.driver.get([DB_KEY]);
+          const again = await this.driver.get([DB_KEY, SALVAGE_KEY]);
           const currentRaw = again[DB_KEY] ?? raw;
+          const currentResult = migrateDatabase(currentRaw);
           const currentVer =
             typeof (currentRaw as Record<string, unknown> | null)
               ?.schemaVersion === "number"
               ? ((currentRaw as Record<string, unknown>)
                   .schemaVersion as number)
               : 0;
-          if (currentVer < result.database.schemaVersion) {
+          if (currentVer < currentResult.database.schemaVersion) {
+            const nextSalvage = appendSalvage(again[SALVAGE_KEY], currentRaw);
             await this.driver.set({
-              [SALVAGE_KEY]: currentRaw,
-              [DB_KEY]: result.database,
+              [SALVAGE_KEY]: nextSalvage,
+              [DB_KEY]: currentResult.database,
             });
           }
           const readBackRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
           const readBackResult = migrateDatabase(readBackRaw);
           if (
-            !databaseContentMatches(result.database, readBackResult.database)
+            !databaseContentMatches(
+              currentResult.database,
+              readBackResult.database,
+            )
           ) {
             throw new Error("Migrated database content mismatch on read-back");
           }
         });
-        return result.database;
+        const finalRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
+        return migrateDatabase(finalRaw).database;
       }
       return result.database;
     } catch (e) {
@@ -341,11 +351,12 @@ export class LibraryStore {
     await this.driver.set({ [DB_KEY]: toWrite });
     await this.driver.remove([CORRUPT_KEY]).catch(() => undefined);
 
-    const read = await this.readDatabaseUnlocked();
-    if (!databaseContentMatches(toWrite, read)) {
+    const readRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
+    const readMigrated = migrateDatabase(readRaw, { strictCurrent: true });
+    if (!databaseContentMatches(toWrite, readMigrated.database)) {
       throw new Error("Read-back content mismatch");
     }
-    return read;
+    return readMigrated.database;
   }
 
   /** Read without taking the queue (caller must already hold exclusive). */
@@ -365,22 +376,29 @@ export class LibraryStore {
     try {
       const result = migrateDatabase(raw);
       if (result.didMigrate) {
-        const again = await this.driver.get([DB_KEY]);
+        const again = await this.driver.get([DB_KEY, SALVAGE_KEY]);
         const currentRaw = again[DB_KEY] ?? raw;
+        const currentResult = migrateDatabase(currentRaw);
         const currentVer =
           typeof (currentRaw as Record<string, unknown> | null)
             ?.schemaVersion === "number"
             ? ((currentRaw as Record<string, unknown>).schemaVersion as number)
             : 0;
-        if (currentVer < result.database.schemaVersion) {
+        if (currentVer < currentResult.database.schemaVersion) {
+          const nextSalvage = appendSalvage(again[SALVAGE_KEY], currentRaw);
           await this.driver.set({
-            [SALVAGE_KEY]: currentRaw,
-            [DB_KEY]: result.database,
+            [SALVAGE_KEY]: nextSalvage,
+            [DB_KEY]: currentResult.database,
           });
         }
         const readBackRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
         const readBackResult = migrateDatabase(readBackRaw);
-        if (!databaseContentMatches(result.database, readBackResult.database)) {
+        if (
+          !databaseContentMatches(
+            currentResult.database,
+            readBackResult.database,
+          )
+        ) {
           throw new Error("Migrated database content mismatch on read-back");
         }
         return readBackResult.database;
@@ -473,17 +491,9 @@ export class LibraryStore {
     // Preserve current raw before restore (even if corrupt) in durable salvage
     const currentRaw = data[DB_KEY] ?? data[CORRUPT_KEY] ?? data[SALVAGE_KEY];
     if (currentRaw != null) {
-      let isCurrentCorrupt = false;
-      try {
-        migrateDatabase(currentRaw);
-      } catch {
-        isCurrentCorrupt = true;
-      }
-      if (data[SALVAGE_KEY] == null || isCurrentCorrupt) {
-        await this.driver.set({
-          [SALVAGE_KEY]: appendSalvage(data[SALVAGE_KEY], currentRaw),
-        });
-      }
+      await this.driver.set({
+        [SALVAGE_KEY]: appendSalvage(data[SALVAGE_KEY], currentRaw),
+      });
       try {
         const cur = migrateDatabase(currentRaw).database;
         const snap: Snapshot = {
@@ -509,8 +519,6 @@ export class LibraryStore {
           : "Backup is not usable",
       );
     }
-    await this.driver.set({ [DB_KEY]: restored });
-    await this.driver.remove([CORRUPT_KEY]);
 
     const rollback = async () => {
       const restoreMap: Record<string, unknown> = {};
@@ -526,9 +534,12 @@ export class LibraryStore {
     };
 
     try {
+      await this.driver.set({ [DB_KEY]: restored });
+      if (data[CORRUPT_KEY] !== undefined) {
+        await this.driver.remove([CORRUPT_KEY]);
+      }
       const readBack = await this.readDatabaseUnlocked();
       if (!databaseContentMatches(restored, readBack)) {
-        await rollback();
         throw new Error("Restored database content mismatch");
       }
     } catch (err) {
