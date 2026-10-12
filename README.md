@@ -73,7 +73,7 @@ npm audit
 ```
 
 - Unit tests: Vitest
-- E2E: Playwright loads the **unpacked** extension in an isolated profile under `/tmp` (no spaces). First run installs Playwright browsers via `npx playwright install chromium` if needed.
+- E2E: Playwright loads the **unpacked** extension in an isolated profile under `/tmp` (no spaces). Chromium must be installed beforehand via `npx playwright install chromium`.
 - Perf: writes raw samples to `output/perf/perf-samples.json` (measures true UI interactive readiness, document scroll, and p50/p95)
 
 E2E artifacts: `output/playwright/` (screenshots, traces).

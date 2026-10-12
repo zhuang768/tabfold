@@ -7,5 +7,5 @@
 3. 決定是否上架 Chrome Web Store，並用你的開發者帳號送審（本專案僅準備英文素材草稿）。
 4. 自訂快捷鍵衝突時，至 `chrome://extensions/shortcuts` 調整。
 5. 無痕模式：若需要，於 `chrome://extensions` → Tabfold →「允許在無痕模式下使用」。
-6. 真實影音播放中點圖示，確認取消／確認綁定行為（E2E 未解碼真實媒體）。
+6. 真實影音播放中點圖示，確認取消／確認綁定行為（E2E 已用 AudioContext fixture 驗證授權流程；日常複雜串流媒體播放可手動實測）。
 7. 驗收通過後的 GitHub 上傳／發佈由監工流程處理（代理人不 push）。
