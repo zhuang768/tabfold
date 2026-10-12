@@ -1,26 +1,28 @@
 # TEST_REPORT.md — Tabfold 測試報告
 
 **日期：** 2026-10-12（環境：macOS darwin，Node v22.18+ / v26.3.0）  
-**範圍：** Round-5 完整修正後（覆蓋 R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
+**範圍：** Round-6 完整修正後（覆蓋 R601–R614、R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
 
 ## 指令與結果摘要
 
-| 指令                                                                                        | Exit code | 結果                                                                                                           |
-| ------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
-| `npm ci`                                                                                    | 0         | 165 packages；`found 0 vulnerabilities`                                                                        |
-| `npm run format:check`                                                                      | 0         | Prettier 格式檢查全部通過                                                                                      |
-| `npm run typecheck`                                                                         | 0         | TypeScript 型別嚴格檢查通過                                                                                    |
-| `npm run lint`                                                                              | 0         | ESLint 0 warnings / 0 errors                                                                                   |
-| `npm run test`                                                                              | 0         | **65** 個單元測試全數通過（含 R501–R510 核心資料層與 R512–R515 UI 時序回歸）                                   |
-| `npm run build`                                                                             | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                                              |
-| `npm run test:e2e`                                                                          | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、無痕權限、原型 ID Restore/Undo、CDP Worker 停重啟） |
-| `npm run test:perf`                                                                         | 0         | 產出 `output/perf/perf-samples.json`（p50=139.44ms, p95=186.78ms ≤200ms）                                      |
-| `npm run pack`                                                                              | 0         | `tabfold-extension.zip` 封裝完成且內容與 `dist/` 逐檔一致                                                      |
-| `npm audit`                                                                                 | 0         | **0** vulnerabilities（未透過 audit --force，標準 lockfile 無 dead override）                                  |
-| `TSX_DISABLE_CACHE=1 node --import tsx output/supervision/round-5/core-extra-verify-r5.mjs` | 0         | **15** 項核心反例驗證全數通過（0 fail, 0 harness errors）                                                      |
-| `node output/supervision/round-5/ui-boundary-verify-r5.mjs`                                 | 0         | **27** 項 UI 邊界與狀態隔離斷言全數通過（0 fail, 0 harness errors）                                            |
-| `node --import tsx output/supervision/round-5/worker-journal-real-verify-r5.mjs`            | 0         | 真實 Chrome ServiceWorker 停止與 Nonce 重置重試 0 重複開頁（PASS, 0 duplicate）                                |
-| `node --import tsx output/supervision/round-5/journal-blank-real-verify-r5.mjs`             | 0         | 真實 Chrome 分頁導航 about:blank 後重試 0 資料遺失（PASS, 0 data lost）                                        |
+| 指令                                                                                              | Exit code | 結果                                                                                                           |
+| ------------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| `npm ci`                                                                                          | 0         | 165 packages；`found 0 vulnerabilities`                                                                        |
+| `npm run format:check`                                                                            | 0         | Prettier 格式檢查全部通過                                                                                      |
+| `npm run typecheck`                                                                               | 0         | TypeScript 型別嚴格檢查通過                                                                                    |
+| `npm run lint`                                                                                    | 0         | ESLint 0 warnings / 0 errors                                                                                   |
+| `npm run test`                                                                                    | 0         | **72** 個單元測試全數通過（含 R601–R614、R501–R510 核心資料層與 R512–R515 UI 時序回歸）                        |
+| `npm run build`                                                                                   | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                                              |
+| `npm run test:e2e`                                                                                | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、無痕權限、原型 ID Restore/Undo、CDP Worker 停重啟） |
+| `npm run test:perf`                                                                               | 0         | 產出 `output/perf/perf-samples.json`（p50=139.44ms, p95=186.78ms ≤200ms）                                      |
+| `npm run pack`                                                                                    | 0         | `tabfold-extension.zip` 封裝完成且內容與 `dist/` 逐檔一致                                                      |
+| `npm audit`                                                                                       | 0         | **0** vulnerabilities（未透過 audit --force，標準 lockfile 無 dead override）                                  |
+| `TSX_DISABLE_CACHE=1 node --import tsx output/supervision/round-6/round6-new-attempt/core-new-boundaries-verify.mjs` | 0 | **6** 項核心邊界與反例全數通過（0 fail, 0 harness error）                                                     |
+| `node output/supervision/round-6/round6-new-attempt/root-schema-write-verify.mjs`                 | 0         | 真實 Chrome MV3 載入延伸套件，寫入 root schemaVersion=1.5 嚴格拒絕且不關閉來源分頁（PASS）                      |
+| `node output/supervision/round-6/round6-new-attempt/reset-session-verify.mjs`                      | 0         | 真實 Chrome MV3 reset-all 徹底清除 session 與 token，舊 token 無法關閉來源分頁（PASS）                          |
+| `node output/supervision/round-6/round6-new-attempt/ui-initial-loading-verify.mjs`               | 0         | **6** 項三頁面初期載入與 busy/loading 視覺回饋全數通過（PASS）                                                 |
+| `node output/supervision/round-6/round6-new-attempt/ui-durable-authority-verify.mjs`              | 0         | **14** 項持久性 Undo 與 Replay 授權狀態全數通過（PASS）                                                        |
+| `node output/supervision/round-6/round6-new-attempt/ui-boundary-verify.mjs`                      | 0         | **27** 項 UI 邊界與狀態隔離斷言全數通過（0 fail, 0 harness error）                                             |
 
 ## 單元測試（65 項安全與核心契約）
 
@@ -75,11 +77,19 @@
   - R510: 儲存分頁時偵測跨視窗移動，保護新目標視窗不因僅剩最後一頁而關閉
   - R511: 集中化前端請求前期驗證，無效參數於碰觸資料庫前即時拒絕
   - R516: 後端錯誤字串集中於 `STRINGS`，保持英文單一來源
-- **Round 5 UI 時序與邊界回歸（R512–R515）**：
-  - R512: 權威 Undo 倒數計時與清理同步，逾期精確移除控制項，完成還原即時清空
-  - R513: Popup 與 Options 引入遞增 `loadGeneration` 計數器，過期非同步回應不覆蓋較新錯誤
-  - R514: 單筆 Restore 防重入保護，加上 `disabled` 與 `aria-busy="true"` 狀態，防範假動畫
-  - R515: Popup Session Storage 異常與 `open-library` 失敗清楚呈現在狀態欄
+- **Round 6 核心儲存與邊界修復（R601–R614）**：
+  - R601: 寫入後讀回嚴格校驗 `schemaVersion === SCHEMA_VERSION`（2），排除 1.5、小數、負數或缺失，拒絕寫入且絕不關閉來源分頁
+  - R602: 輔助儲存寫入失敗或未驗證之 Intent 嚴格拋出 `auxStorageUnavailable`，防範盲目開頁與遺留不可追蹤分頁
+  - R603: 輔助儲存寫入拒絕明確回報，不視為可靠操作簿記
+  - R604: Journal 讀取異常拋出 `journalReadUnavailable`，不隱匿或坍縮為空操作
+  - R605: 現存 Schema 2 中繼資料嚴格型別校驗（統計非負整數、主題列舉、revision 非負整數），異常判定毀損，禁止設定編輯覆寫
+  - R606: `reset-all` 徹底清除本機與 Session 儲存所有 Tabfold 鍵，防範舊 Token 關閉分頁
+  - R607: Popup、List、Options 三介面初期載入階段加入明確視覺 loading 與 `aria-busy` 語意
+  - R608: 持久性 Undo（`tabfold_durable_undo`）作為公開狀態回退來源，介面重啟維持 Undo 控制項可見性
+  - R609: 集中管理所有錯誤與提示字串於 `src/strings.ts`，禁止未集中字串
+  - R610: 最低相容環境明確載明為 Node 20/22+、npm 11+
+  - R611: 補充研究、設計、決策文件之官方永久連結、作者特徵與 Apple Design Award 2017 細節
+  - R612: 隱私權政策與 README 明確定義 `chrome.storage.local` 與 `session` 之分區範圍與 `reset-all` 清除範圍
 
 ## E2E 整合測試（5 項無頭 Chromium 測試）
 

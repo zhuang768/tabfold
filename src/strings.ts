@@ -222,6 +222,18 @@ export const STRINGS = {
   backupContentMismatch: "Restored database content mismatch.",
   migratedContentMismatch: "Migrated database content mismatch on read-back.",
   readbackMismatch: "Read-back content mismatch.",
+  sessionStorageWarning: (detail: string) =>
+    `Session storage warning: ${detail}`,
+  unknownSettingsKey: (k: string) => `Unknown settings key: ${k}`,
+  removeAfterRestoreBoolean: "removeAfterRestore must be boolean.",
+  invalidDefaultScope: "Invalid defaultScope.",
+  invalidTheme: "Invalid theme.",
+  whitelistMustBeStringArray: "whitelist must be an array of strings.",
+  onboardingCompleteBoolean: "onboardingComplete must be boolean.",
+  unsavedHintAcknowledgedBoolean: "unsavedHintAcknowledged must be boolean.",
+  invalidBackupId: "Invalid backup id.",
+  auxStorageUnavailable: "Auxiliary storage unavailable.",
+  journalReadUnavailable: "Journal read unavailable.",
   actionDefaultTitle: "Save current tab with Tabfold",
 } as const;
 

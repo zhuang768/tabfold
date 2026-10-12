@@ -363,8 +363,8 @@ function migrateStats(
       "totalImported",
     ] as const) {
       const v = raw[key];
-      if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
-        throw new CorruptDatabaseError(`stats.${key} must be a number`, raw);
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+        throw new CorruptDatabaseError(`stats.${key} must be an integer`, raw);
       }
     }
   }
@@ -409,12 +409,29 @@ export function migrateDatabase(
     throw new CorruptDatabaseError("Database root is not an object", raw);
   }
 
+  if (opts.strictCurrent) {
+    if (
+      raw.schemaVersion !== SCHEMA_VERSION ||
+      typeof raw.schemaVersion !== "number" ||
+      !Number.isInteger(raw.schemaVersion)
+    ) {
+      throw new CorruptDatabaseError(
+        `strictCurrent requires schemaVersion === ${SCHEMA_VERSION}`,
+        raw,
+      );
+    }
+  }
+
   if (
     raw.schemaVersion !== undefined &&
     (typeof raw.schemaVersion !== "number" ||
-      !Number.isFinite(raw.schemaVersion))
+      !Number.isInteger(raw.schemaVersion) ||
+      raw.schemaVersion < 0)
   ) {
-    throw new CorruptDatabaseError("schemaVersion must be a number", raw);
+    throw new CorruptDatabaseError(
+      "schemaVersion must be a non-negative integer",
+      raw,
+    );
   }
 
   const version = asNumber(raw.schemaVersion, 0);
@@ -428,6 +445,13 @@ export function migrateDatabase(
   const isV1 =
     version === 1 ||
     (version === 0 && Array.isArray(raw.tabs) && !Array.isArray(raw.entries));
+
+  if (!isV1 && raw.schemaVersion !== SCHEMA_VERSION) {
+    throw new CorruptDatabaseError(
+      `schemaVersion must be ${SCHEMA_VERSION} for entries database, got ${String(raw.schemaVersion)}`,
+      raw,
+    );
+  }
 
   if (isV1) {
     const tabs = Array.isArray(raw.tabs) ? raw.tabs : [];

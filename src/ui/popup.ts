@@ -8,6 +8,7 @@ import {
   formatTime,
   listenStorageReload,
   renderFavicon,
+  resolveEffectiveUndo,
   send,
   text,
 } from "./shared.js";
@@ -350,15 +351,16 @@ async function load(): Promise<void> {
     ),
   );
 
+  const effectiveUndo = await resolveEffectiveUndo(database);
   const statusEl = $("status");
   const existingBtn =
     statusEl.querySelector?.("#btn-undo") ??
     (statusEl.querySelectorAll ? statusEl.querySelectorAll("button")[0] : null);
 
   if (
-    !database.undo ||
-    database.undo.expiresAt <= Date.now() ||
-    !database.undo.ids.length
+    !effectiveUndo ||
+    effectiveUndo.expiresAt <= Date.now() ||
+    !effectiveUndo.ids.length
   ) {
     if (existingBtn) existingBtn.remove();
     if (undoTimer) {
@@ -366,7 +368,7 @@ async function load(): Promise<void> {
       undoTimer = null;
     }
   } else {
-    const remainingMs = Math.max(0, database.undo.expiresAt - Date.now());
+    const remainingMs = Math.max(0, effectiveUndo.expiresAt - Date.now());
     if (existingBtn) {
       if (undoTimer) window.clearTimeout(undoTimer);
       undoTimer = window.setTimeout(() => {
@@ -378,10 +380,10 @@ async function load(): Promise<void> {
         !statusEl.hidden &&
         (statusEl.textContent.trim().length > 0 ||
           statusEl.children.length > 0);
-      const count = database.undo.ids.length;
+      const count = effectiveUndo.ids.length;
       const msg = count === 1 ? STRINGS.savedOne : STRINGS.savedN(count);
       if (!hasExistingStatus) {
-        showStatus(msg, "ok", database.undo.ids, remainingMs);
+        showStatus(msg, "ok", effectiveUndo.ids, remainingMs);
       } else {
         const btn = document.createElement("button");
         btn.type = "button";
@@ -543,7 +545,7 @@ async function init(): Promise<void> {
     }
   } catch (e) {
     showStatus(
-      `Session storage warning: ${e instanceof Error ? e.message : String(e)}`,
+      STRINGS.sessionStorageWarning(e instanceof Error ? e.message : String(e)),
       "warn",
     );
   }

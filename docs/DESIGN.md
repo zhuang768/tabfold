@@ -2,10 +2,11 @@
 
 ## 研究參考（借鏡手法與資訊密度，不複製素材）
 
+- **Things 3 (Cultured Code)** (https://culturedcode.com/things/features/ ；Apple Design Award 2017 獲獎)：借鏡其「主動作先行、次要 metadata 漸進展開、清楚 headings 分組、即時搜尋縮小範圍」之操作層級與內容脈絡感。
+- **GoTo tab by Pradeep Kumar** (https://dribbble.com/shots/9881121-GoTo-tab ；Dribbble 設計社群作者作品)：借鏡其多視窗分頁整合、即時標題/網址搜尋、深色模式與鍵盤上下/Enter/快捷操作的一體化清單定位。
 - **Linear Method** (https://linear.app/method)：高資訊密度與單色系微層次、等寬數據標籤、鍵盤優先走訪、嚴格 1px 細邊框襯托資料層級，避免花俏裝飾與廉價多重陰影。
 - **Raycast Design System** (https://raycast.com)：單鍵快速呼叫（一鍵快捷鍵 / 點圖示即存）、即時文字過濾（即打即搜零卡頓）、等寬字元統計指示（Mono badge）、顯式 2px 焦點框（`#1F6C9F`）。
 - **Notion Design**：暖色中性紙感底（`#F7F6F3` / 深色 `#1A1B1A`）與清晰排版層級，襯托長文字可讀性。
-- **Toby / OneTab 借鏡與改良**：借鏡 OneTab 的高密度垂直列表與純文字匯出入相容性，但屏棄其粗糙無樣式外觀；改進 Toby 的重度圖形卡片負擔，採 36px 緊湊卡片列高以提升大量分頁快速掃描效率。
 - **無障礙標準**：顯式 2px 焦點框（`#1F6C9F`）、色彩對比 ≥ 4.5:1、`prefers-reduced-motion` 全面關閉動畫過渡。
 
 ## 設計系統

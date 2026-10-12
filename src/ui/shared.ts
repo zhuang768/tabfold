@@ -96,9 +96,68 @@ export function listenStorageReload(reload: () => void): void {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (
       area === "local" &&
-      (changes.tabfold_database || changes.tabfold_backups)
+      (changes.tabfold_database ||
+        changes.tabfold_backups ||
+        changes.tabfold_durable_undo)
     ) {
       reload();
     }
   });
+}
+
+export interface EffectiveUndo {
+  ids: string[];
+  expiresAt: number;
+}
+
+export async function resolveEffectiveUndo(
+  db: {
+    entries: { id: string }[];
+    undo: { ids: string[]; expiresAt: number } | null;
+  } | null,
+): Promise<EffectiveUndo | null> {
+  const now = Date.now();
+  if (db?.undo && db.undo.expiresAt > now && db.undo.ids.length > 0) {
+    const existingIds = new Set(db.entries.map((e) => e.id));
+    const validIds = db.undo.ids.filter((id) => existingIds.has(id));
+    if (validIds.length > 0) {
+      return { ids: validIds, expiresAt: db.undo.expiresAt };
+    }
+  }
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage) {
+      let durable: { ids?: string[]; expiresAt?: number } | undefined;
+      if (chrome.storage.session?.get) {
+        const sess = (await chrome.storage.session
+          .get("tabfold_durable_undo")
+          .catch(() => ({}))) as Record<string, unknown>;
+        durable = sess?.tabfold_durable_undo as
+          { ids?: string[]; expiresAt?: number } | undefined;
+      }
+      if (!durable && chrome.storage.local?.get) {
+        const loc = (await chrome.storage.local
+          .get("tabfold_durable_undo")
+          .catch(() => ({}))) as Record<string, unknown>;
+        durable = loc?.tabfold_durable_undo as
+          { ids?: string[]; expiresAt?: number } | undefined;
+      }
+      if (
+        durable &&
+        Array.isArray(durable.ids) &&
+        typeof durable.expiresAt === "number" &&
+        durable.expiresAt > now
+      ) {
+        const existingIds = db ? new Set(db.entries.map((e) => e.id)) : null;
+        const validIds = existingIds
+          ? durable.ids.filter((id) => existingIds.has(id))
+          : durable.ids;
+        if (validIds.length > 0) {
+          return { ids: validIds, expiresAt: durable.expiresAt };
+        }
+      }
+    }
+  } catch {
+    // auxiliary storage lookup failed
+  }
+  return null;
 }

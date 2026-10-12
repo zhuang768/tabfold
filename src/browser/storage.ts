@@ -1,10 +1,12 @@
 import {
   MAX_BACKUPS,
+  SCHEMA_VERSION,
   createEmptyDatabase,
   type BackupMeta,
   type Database,
   type Snapshot,
 } from "../types.js";
+import { STRINGS } from "../strings.js";
 import {
   migrateDatabase,
   MigrationError,
@@ -13,10 +15,15 @@ import {
 import { databaseContentMatches } from "../core/verify.js";
 import { createId } from "../core/id.js";
 
-const DB_KEY = "tabfold_database";
-const BACKUPS_KEY = "tabfold_backups";
-const CORRUPT_KEY = "tabfold_corrupt_raw";
-const SALVAGE_KEY = "tabfold_salvage";
+export const DB_KEY = "tabfold_database";
+export const BACKUPS_KEY = "tabfold_backups";
+export const CORRUPT_KEY = "tabfold_corrupt_raw";
+export const SALVAGE_KEY = "tabfold_salvage";
+export const OPERATION_JOURNAL_KEY = "tabfold_op_journal";
+export const RESTORE_JOURNAL_KEY = "tabfold_restore_journal";
+export const UNDO_JOURNAL_KEY = "tabfold_undo_journal";
+export const INTENT_KEY = "tabfold_op_intent";
+export const DURABLE_UNDO_KEY = "tabfold_durable_undo";
 
 export interface StorageDriver {
   get(keys: string[]): Promise<Record<string, unknown>>;
@@ -252,8 +259,12 @@ export class LibraryStore {
     if (raw == null) {
       return createEmptyDatabase();
     }
+    const isCurrent =
+      typeof (raw as Record<string, unknown> | null)?.schemaVersion ===
+        "number" &&
+      (raw as Record<string, unknown>).schemaVersion === SCHEMA_VERSION;
     try {
-      const result = migrateDatabase(raw);
+      const result = migrateDatabase(raw, { strictCurrent: isCurrent });
       if (result.didMigrate) {
         // Persist migration under exclusive lock so ids stay stable
         await this.exclusive(async () => {
@@ -274,18 +285,20 @@ export class LibraryStore {
             });
           }
           const readBackRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
-          const readBackResult = migrateDatabase(readBackRaw);
+          const readBackResult = migrateDatabase(readBackRaw, {
+            strictCurrent: true,
+          });
           if (
             !databaseContentMatches(
               currentResult.database,
               readBackResult.database,
             )
           ) {
-            throw new Error("Migrated database content mismatch on read-back");
+            throw new Error(STRINGS.migratedContentMismatch);
           }
         });
         const finalRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
-        return migrateDatabase(finalRaw).database;
+        return migrateDatabase(finalRaw, { strictCurrent: true }).database;
       }
       return result.database;
     } catch (e) {
@@ -352,9 +365,21 @@ export class LibraryStore {
     await this.driver.remove([CORRUPT_KEY]).catch(() => undefined);
 
     const readRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
+    if (
+      typeof readRaw !== "object" ||
+      readRaw === null ||
+      (readRaw as Record<string, unknown>).schemaVersion !== SCHEMA_VERSION ||
+      typeof (readRaw as Record<string, unknown>).schemaVersion !== "number" ||
+      !Number.isInteger((readRaw as Record<string, unknown>).schemaVersion)
+    ) {
+      throw new CorruptDataError(
+        "Read-back root schemaVersion invalid or missing",
+        readRaw,
+      );
+    }
     const readMigrated = migrateDatabase(readRaw, { strictCurrent: true });
     if (!databaseContentMatches(toWrite, readMigrated.database)) {
-      throw new Error("Read-back content mismatch");
+      throw new Error(STRINGS.readbackMismatch);
     }
     return readMigrated.database;
   }
@@ -373,8 +398,12 @@ export class LibraryStore {
     }
     const raw = data[DB_KEY];
     if (raw == null) return createEmptyDatabase();
+    const isCurrent =
+      typeof (raw as Record<string, unknown> | null)?.schemaVersion ===
+        "number" &&
+      (raw as Record<string, unknown>).schemaVersion === SCHEMA_VERSION;
     try {
-      const result = migrateDatabase(raw);
+      const result = migrateDatabase(raw, { strictCurrent: isCurrent });
       if (result.didMigrate) {
         const again = await this.driver.get([DB_KEY, SALVAGE_KEY]);
         const currentRaw = again[DB_KEY] ?? raw;
@@ -392,14 +421,16 @@ export class LibraryStore {
           });
         }
         const readBackRaw = (await this.driver.get([DB_KEY]))[DB_KEY];
-        const readBackResult = migrateDatabase(readBackRaw);
+        const readBackResult = migrateDatabase(readBackRaw, {
+          strictCurrent: true,
+        });
         if (
           !databaseContentMatches(
             currentResult.database,
             readBackResult.database,
           )
         ) {
-          throw new Error("Migrated database content mismatch on read-back");
+          throw new Error(STRINGS.migratedContentMismatch);
         }
         return readBackResult.database;
       }
@@ -486,7 +517,7 @@ export class LibraryStore {
       ? (data[BACKUPS_KEY] as Snapshot[])
       : [];
     const found = existing.find((s) => s.id === id);
-    if (!found) throw new Error("Backup not found");
+    if (!found) throw new Error(STRINGS.backupNotFound);
 
     // Preserve current raw before restore (even if corrupt) in durable salvage
     const currentRaw = data[DB_KEY] ?? data[CORRUPT_KEY] ?? data[SALVAGE_KEY];
@@ -515,8 +546,8 @@ export class LibraryStore {
     } catch (e) {
       throw new Error(
         e instanceof Error
-          ? `Backup is not usable: ${e.message}`
-          : "Backup is not usable",
+          ? `${STRINGS.backupNotUsable}: ${e.message}`
+          : STRINGS.backupNotUsable,
       );
     }
 
@@ -540,7 +571,7 @@ export class LibraryStore {
       }
       const readBack = await this.readDatabaseUnlocked();
       if (!databaseContentMatches(restored, readBack)) {
-        throw new Error("Restored database content mismatch");
+        throw new Error(STRINGS.backupContentMismatch);
       }
     } catch (err) {
       await rollback().catch(() => undefined);
@@ -560,12 +591,27 @@ export class LibraryStore {
       CORRUPT_KEY,
       BACKUPS_KEY,
       SALVAGE_KEY,
+      OPERATION_JOURNAL_KEY,
+      RESTORE_JOURNAL_KEY,
+      UNDO_JOURNAL_KEY,
+      INTENT_KEY,
+      DURABLE_UNDO_KEY,
     ]);
     return `${JSON.stringify(data, null, 2)}\n`;
   }
 
   async resetAllUnlocked(): Promise<void> {
-    await this.driver.remove([DB_KEY, BACKUPS_KEY, CORRUPT_KEY, SALVAGE_KEY]);
+    await this.driver.remove([
+      DB_KEY,
+      BACKUPS_KEY,
+      CORRUPT_KEY,
+      SALVAGE_KEY,
+      OPERATION_JOURNAL_KEY,
+      RESTORE_JOURNAL_KEY,
+      UNDO_JOURNAL_KEY,
+      INTENT_KEY,
+      DURABLE_UNDO_KEY,
+    ]);
   }
 
   async resetAll(token?: LockToken): Promise<void> {

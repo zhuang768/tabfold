@@ -127,6 +127,7 @@ async function setup(
   extras: string,
   handler: (req: { type: string; [k: string]: unknown }) => Promise<unknown>,
   session: Record<string, unknown> = {},
+  local: Record<string, unknown> = {},
 ) {
   const els = new Map<string, El>();
   const get = (id: string) => {
@@ -179,6 +180,11 @@ async function setup(
       session: {
         get: async () => session,
         set: async (x: Record<string, unknown>) => Object.assign(session, x),
+        remove: async () => {},
+      },
+      local: {
+        get: async () => local,
+        set: async (x: Record<string, unknown>) => Object.assign(local, x),
         remove: async () => {},
       },
       onChanged: { addListener: () => {} },
@@ -503,5 +509,76 @@ describe("UI State, Timing & Isolation Regressions (R409–R414)", () => {
     resolveOld({ ok: true, data: { database: mkDb() } });
     await pending;
     expect(ui.a.getDatabase()).toBeNull();
+  });
+
+  it("popup: durable undo authority exposes Undo button when database.undo is null (R604)", async () => {
+    const durable = {
+      ids: ["e1"],
+      expiresAt: 1700000012000,
+    };
+    const ui = await setup(
+      "src/ui/popup.ts",
+      "load,getDatabase:()=>database",
+      async (req) => {
+        if (req.type === "get-state") {
+          return { ok: true, data: { database: mkDb(null) } };
+        }
+        return { ok: true, data: {} };
+      },
+      { tabfold_durable_undo: durable },
+      { tabfold_durable_undo: durable },
+    );
+    await ui.a.load();
+    expect(
+      (ui.a as { getDatabase: () => { undo: unknown } }).getDatabase().undo,
+    ).toBeNull();
+    expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+  });
+
+  it("list: durable undo authority exposes Undo button when database.undo is null (R604)", async () => {
+    const durable = {
+      ids: ["e1"],
+      expiresAt: 1700000012000,
+    };
+    const ui = await setup(
+      "src/ui/list.ts",
+      "load,getDatabase:()=>database",
+      async (req) => {
+        if (req.type === "get-state") {
+          return { ok: true, data: { database: mkDb(null) } };
+        }
+        if (req.type === "list-window-tabs") {
+          return { ok: true, data: { tabs: [] } };
+        }
+        return { ok: true, data: {} };
+      },
+      { tabfold_durable_undo: durable },
+      { tabfold_durable_undo: durable },
+    );
+    await ui.a.load();
+    expect(
+      (ui.a as { getDatabase: () => { undo: unknown } }).getDatabase().undo,
+    ).toBeNull();
+    expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+  });
+
+  it("options: load shows visible loading feedback before get-state completes (R607)", async () => {
+    let resolveState!: (v: unknown) => void;
+    const statePromise = new Promise((r) => {
+      resolveState = r;
+    });
+    const ui = await setup("src/ui/options.ts", "load", async (req) => {
+      if (req.type === "get-state") {
+        await statePromise;
+        return { ok: true, data: { database: mkDb(), backups: [] } };
+      }
+      return { ok: true, data: {} };
+    });
+    const pendingLoad = ui.a.load();
+    expect(ui.get("status").textContent).toContain("Loading");
+    expect(ui.get("status").hidden).toBe(false);
+    resolveState(null);
+    await pendingLoad;
+    expect(ui.get("status").hidden).toBe(true);
   });
 });

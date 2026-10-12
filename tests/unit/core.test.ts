@@ -1783,4 +1783,155 @@ describe("Round 5 formal regressions (R501–R510)", () => {
     expect(saved.closed === 0 || newWindowPreserved).toBe(true);
     setStoreForTests(null);
   });
+
+  describe("Round 6 formal regressions (R601–R605)", () => {
+    it("R601: failed auxiliary intent/journal recording aborts createTab to prevent duplicate opens", async () => {
+      const entryObj: SavedTab = {
+        schemaVersion: 2,
+        id: "r6-intent-fail",
+        url: "https://r6-intent-fail.test/",
+        title: "R6 Intent Fail",
+        favicon: null,
+        savedAt: 1000,
+        source: { windowId: 1, index: 0, pinned: false, audible: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const db: Database = {
+        ...createEmptyDatabase(),
+        entries: [entryObj],
+        settings: {
+          ...createEmptyDatabase().settings,
+          onboardingComplete: true,
+          unsavedHintAcknowledged: true,
+        },
+      };
+      const base = memoryDriver({ tabfold_database: db });
+      const driver = {
+        ...base,
+        set: async (items: Record<string, unknown>) => {
+          if (Object.keys(items).some((k) => k !== "tabfold_database")) {
+            throw new Error("Auxiliary write unavailable");
+          }
+          return base.set(items);
+        },
+      };
+      const b = mock();
+      chrome.storage.session.set = async () => {
+        throw new Error("Session write unavailable");
+      };
+      setStoreForTests(new LibraryStore(driver));
+      const res = await restoreEntries(["r6-intent-fail"]);
+      expect(res.opened).toBe(0);
+      expect(b.created.length).toBe(0);
+      setStoreForTests(null);
+    });
+
+    it("R602: stored current database with malformed metadata is flagged corrupt: true and un-overwritten", async () => {
+      const corrupt: Record<string, unknown> = {
+        ...createEmptyDatabase(),
+        entries: [
+          {
+            schemaVersion: 2,
+            id: "r6-kept-url",
+            url: "https://kept.test/",
+            title: "Kept",
+            favicon: null,
+            savedAt: 1000,
+            source: { windowId: 1, index: 0, pinned: false, audible: false },
+            group: "",
+            tags: [],
+            status: "saved",
+          },
+        ],
+        revision: "7",
+        settings: { ...createEmptyDatabase().settings, theme: "BROKEN-THEME" },
+        stats: { ...createEmptyDatabase().stats, totalSaved: "123" },
+      };
+      const base = memoryDriver({ tabfold_database: corrupt });
+      mock();
+      setStoreForTests(new LibraryStore(base));
+      const state = await handleRequest({ type: "get-state" });
+      expect(state.ok).toBe(true);
+      if (state.ok) {
+        expect((state.data as Record<string, unknown>).corrupt).toBe(true);
+      }
+      const edit = await handleRequest({
+        type: "patch-settings",
+        patch: { theme: "dark" },
+      });
+      expect(edit.ok).toBe(false);
+      const storage = await base.get(["tabfold_database"]);
+      expect(JSON.stringify(storage.tabfold_database)).toBe(
+        JSON.stringify(corrupt),
+      );
+      setStoreForTests(null);
+    });
+
+    it("R603: root schemaVersion mismatch (1.5) on write read-back triggers CorruptDataError and retains source tab", async () => {
+      const base = memoryDriver({ tabfold_database: createEmptyDatabase() });
+      const driver = {
+        ...base,
+        set: async (items: Record<string, unknown>) => {
+          const copy = structuredClone(items);
+          if (
+            copy.tabfold_database &&
+            typeof copy.tabfold_database === "object"
+          ) {
+            (copy.tabfold_database as Record<string, unknown>).schemaVersion =
+              1.5;
+          }
+          return base.set(copy);
+        },
+      };
+      const b = mock([
+        {
+          id: 1,
+          url: "https://r6-schema.test/",
+          title: "R6 Schema",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+          audible: false,
+        },
+        {
+          id: 2,
+          url: "chrome://settings",
+          title: "Settings",
+          windowId: 1,
+          index: 1,
+          pinned: false,
+          active: false,
+          audible: false,
+        },
+      ]);
+      setStoreForTests(new LibraryStore(driver));
+      const saved = await saveTabs({ scope: "current", tabId: 1 });
+      expect(saved.closed).toBe(0);
+      expect(b.tabs().some((t) => t.id === 1)).toBe(true);
+      setStoreForTests(null);
+    });
+
+    it("R605: reset-all purges all operational keys and invalidates stale confirmation tokens", async () => {
+      const base = memoryDriver({
+        tabfold_database: createEmptyDatabase(),
+        tabfold_op_journal: { some: 1 },
+        tabfold_durable_undo: { ids: ["1"], expiresAt: Date.now() + 10000 },
+      });
+      mock();
+      setStoreForTests(new LibraryStore(base));
+      const resetRes = await handleRequest({ type: "reset-all" });
+      expect(resetRes.ok).toBe(true);
+      const stored = await base.get([
+        "tabfold_database",
+        "tabfold_op_journal",
+        "tabfold_durable_undo",
+      ]);
+      expect(stored.tabfold_op_journal).toBeUndefined();
+      expect(stored.tabfold_durable_undo).toBeUndefined();
+      setStoreForTests(null);
+    });
+  });
 });

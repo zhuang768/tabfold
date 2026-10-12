@@ -80,6 +80,6 @@
 | R7  | 設計研究＋自製圖示＋微互動          | 完成 | DESIGN.md + public/icons                                                                                                                                         |
 | R8  | 200ms／1000 筆／量測／無輪詢        | 完成 | output/perf/perf-samples.json（p50=139.44ms, p95=186.78ms ≤ 200ms）；1,000 筆連續 133 幀 p95=16.7ms、0 long tasks；Task Manager 真前後與原生 Action 開銷邊界確證 |
 | R9  | 本機限定、CSP、不可信文字、資料說明 | 完成 | favicon 本機、CSP connect-src none                                                                                                                               |
-| R10 | E2E／單元≥15／故障注入／限制誠實    | 完成 | 65 unit + 5 e2e + 4 verify 腳本（覆蓋 R501–R524、R401–R420、R301–R324、R201–R220 與真 Chrome Worker 重啟及 about:blank 故障注入反例全綠）；限制不含已修 bug      |
+| R10 | E2E／單元≥15／故障注入／限制誠實    | 完成 | 72 unit + 5 e2e + 6 round-6 verify 腳本（覆蓋 R601–R614、R501–R524、R401–R420、R301–R324、R201–R220 與真 Chrome root schema 1.5 讀回拒絕、reset-all session 徹底清除、aux storage 失敗防盲目開頁、journal 讀取失敗防坍縮反例全綠）；限制不含已修 bug |
 | R11 | 每階段可建置＋嚴格型別＋小步 commit | 完成 | 8 大工程 gate 全數通過                                                                                                                                           |
 | R12 | dist＋ZIP＋文件齊全                 | 完成 | zip 內容對應 dist/ 逐檔一致，已完成 pack 與 unzip -t 驗證                                                                                                        |

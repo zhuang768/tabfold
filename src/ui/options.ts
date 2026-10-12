@@ -31,6 +31,14 @@ let loadGeneration = 0;
 
 async function load(): Promise<void> {
   const gen = ++loadGeneration;
+  const statusEl = $("status");
+  if (!isLoaded) {
+    statusEl.hidden = false;
+    statusEl.className = "banner fold";
+    statusEl.textContent = STRINGS.loading;
+    statusEl.setAttribute("aria-busy", "true");
+  }
+
   const res = await send<{
     database: Database | null;
     backups: BackupMeta[];
@@ -39,6 +47,12 @@ async function load(): Promise<void> {
   }>({ type: "get-state" });
 
   if (gen !== loadGeneration) return;
+
+  if (statusEl.textContent === STRINGS.loading) {
+    statusEl.hidden = true;
+    statusEl.removeAttribute("aria-busy");
+    statusEl.textContent = "";
+  }
 
   if (!res.ok) {
     isLoaded = false;

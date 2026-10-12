@@ -37,6 +37,7 @@ import {
   CorruptDataError,
   LibraryStore,
   chromeLocalDriver,
+  DB_KEY,
 } from "./storage.js";
 
 const store = new LibraryStore(chromeLocalDriver());
@@ -156,11 +157,17 @@ export async function updateBadge(count: number): Promise<void> {
 
 async function refreshBadgeFromDb(): Promise<void> {
   try {
-    const db = await getStore().readDatabase();
-    await updateBadge(db.entries.length);
+    const s = getStore();
+    const data = await s.getDriver().get([DB_KEY]);
+    const raw = data?.[DB_KEY] as { entries?: unknown[] } | undefined;
+    if (raw && Array.isArray(raw.entries)) {
+      await updateBadge(raw.entries.length);
+      return;
+    }
   } catch {
-    await updateBadge(0);
+    // fallback
   }
+  await updateBadge(0);
 }
 
 async function ensureWindowSurvives(
@@ -249,8 +256,10 @@ async function getJournal(key: string): Promise<Record<string, number>> {
         }
       }
     }
-  } catch {
-    // best effort driver read
+  } catch (e) {
+    throw new Error(
+      `${STRINGS.journalReadUnavailable}: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
   return result;
 }
@@ -282,23 +291,36 @@ async function recordJournalEntry(
     inMemoryJournals[key] = createCleanDict();
   }
   inMemoryJournals[key][id] = tabId;
-  const current = await getJournal(key);
+  const current = await getJournal(key).catch(() => createCleanDict());
   current[id] = tabId;
   const plain = serializePlainDict(current);
+
+  let sessionOk = false;
+  let driverOk = false;
+  let sessionErr: unknown = null;
+  let driverErr: unknown = null;
 
   try {
     if (typeof chrome !== "undefined" && chrome.storage?.session) {
       await chrome.storage.session.set({ [key]: plain });
+      sessionOk = true;
     }
-  } catch {
-    // session storage set failed
+  } catch (e) {
+    sessionErr = e;
   }
 
   try {
     const s = getStore();
     await s.getDriver().set({ [key]: plain, [OPERATION_JOURNAL_KEY]: plain });
-  } catch {
-    // driver set failed
+    driverOk = true;
+  } catch (e) {
+    driverErr = e;
+  }
+
+  if (!sessionOk && !driverOk) {
+    const err =
+      driverErr || sessionErr || new Error(STRINGS.auxStorageUnavailable);
+    throw err;
   }
 }
 
@@ -341,22 +363,56 @@ interface OperationIntent {
   timestamp: number;
 }
 
+let inMemoryIntent: OperationIntent | null = null;
+
 async function recordIntent(intent: OperationIntent): Promise<void> {
+  inMemoryIntent = intent;
+  let driverSaved = false;
+  let sessionSaved = false;
+  let driverErr: unknown = null;
+  let sessionErr: unknown = null;
+
   try {
     const s = getStore();
     await s.getDriver().set({ [INTENT_KEY]: intent });
+    const readBack = (await s.getDriver().get([INTENT_KEY]))[INTENT_KEY] as
+      OperationIntent | undefined;
+    if (
+      readBack &&
+      readBack.url === intent.url &&
+      readBack.entryId === intent.entryId
+    ) {
+      driverSaved = true;
+    }
+  } catch (e) {
+    driverErr = e;
+  }
+
+  try {
     if (typeof chrome !== "undefined" && chrome.storage?.session) {
       await chrome.storage.session.set({ [INTENT_KEY]: intent });
+      sessionSaved = true;
     }
-  } catch {
-    // best effort
+  } catch (e) {
+    sessionErr = e;
+  }
+
+  if (!driverSaved && !sessionSaved) {
+    const err =
+      driverErr || sessionErr || new Error(STRINGS.auxStorageUnavailable);
+    throw err;
   }
 }
 
 async function clearIntent(): Promise<void> {
+  inMemoryIntent = null;
   try {
     const s = getStore();
     await s.getDriver().remove([INTENT_KEY]);
+  } catch {
+    // best effort
+  }
+  try {
     if (typeof chrome !== "undefined" && chrome.storage?.session) {
       await chrome.storage.session.remove([INTENT_KEY]);
     }
@@ -365,18 +421,23 @@ async function clearIntent(): Promise<void> {
   }
 }
 
-async function getPendingIntent(): Promise<OperationIntent | null> {
+export async function getPendingIntent(): Promise<OperationIntent | null> {
+  if (inMemoryIntent) return inMemoryIntent;
   try {
-    const s = getStore();
-    const data = await s.getDriver().get([INTENT_KEY]);
-    if (data[INTENT_KEY] && typeof data[INTENT_KEY] === "object") {
-      return data[INTENT_KEY] as OperationIntent;
-    }
     if (typeof chrome !== "undefined" && chrome.storage?.session) {
       const sess = await chrome.storage.session.get(INTENT_KEY);
       if (sess[INTENT_KEY] && typeof sess[INTENT_KEY] === "object") {
         return sess[INTENT_KEY] as OperationIntent;
       }
+    }
+  } catch {
+    // best effort
+  }
+  try {
+    const s = getStore();
+    const data = await s.getDriver().get([INTENT_KEY]);
+    if (data[INTENT_KEY] && typeof data[INTENT_KEY] === "object") {
+      return data[INTENT_KEY] as OperationIntent;
     }
   } catch {
     // best effort
@@ -1073,9 +1134,20 @@ export async function restoreEntries(
     let opened = 0;
     let failed = 0;
     const openedIds: string[] = [];
-    const journal = await getJournal(RESTORE_JOURNAL_KEY);
-    const undoJournal = await getJournal(UNDO_JOURNAL_KEY);
-    const pendingIntent = await getPendingIntent();
+    let journal: Record<string, number>;
+    let undoJournal: Record<string, number>;
+    try {
+      journal = await getJournal(RESTORE_JOURNAL_KEY);
+      undoJournal = await getJournal(UNDO_JOURNAL_KEY);
+    } catch (e) {
+      return {
+        opened: 0,
+        failed: targets.length,
+        removed: 0,
+        message:
+          e instanceof Error ? e.message : STRINGS.journalReadUnavailable,
+      };
+    }
 
     for (let i = 0; i < ordered.length; i++) {
       const entry = ordered[i]!;
@@ -1095,13 +1167,16 @@ export async function restoreEntries(
       }
 
       let adoptedTab: chrome.tabs.Tab | null = null;
-      if (
-        pendingIntent &&
-        pendingIntent.entryId === entry.id &&
-        pendingIntent.url === entry.url
-      ) {
-        if (typeof chrome !== "undefined" && chrome.tabs?.query) {
-          const openTabs = await chrome.tabs.query({});
+      if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+        try {
+          const res = chrome.tabs.query({});
+          const openTabs: chrome.tabs.Tab[] = (
+            res && typeof (res as Promise<unknown>).then === "function"
+              ? await (res as Promise<chrome.tabs.Tab[]>).catch(() => [])
+              : Array.isArray(res)
+                ? res
+                : []
+          ) as chrome.tabs.Tab[];
           const match = openTabs.find(
             (t) =>
               (t.url === entry.url || t.pendingUrl === entry.url) &&
@@ -1110,29 +1185,41 @@ export async function restoreEntries(
           if (match && match.id != null) {
             adoptedTab = match;
           }
+        } catch {
+          // ignore query failure
         }
       }
 
       let tab: chrome.tabs.Tab | null = adoptedTab;
       if (!tab) {
-        await recordIntent({
-          opId: "restore",
-          entryId: entry.id,
-          url: entry.url,
-          windowId: entry.source.windowId,
-          timestamp: Date.now(),
-        });
-        tab = await createTabSafe(entry, entry.source.windowId);
+        try {
+          await recordIntent({
+            opId: "restore",
+            entryId: entry.id,
+            url: entry.url,
+            windowId: entry.source.windowId,
+            timestamp: Date.now(),
+          });
+          tab = await createTabSafe(entry, entry.source.windowId);
+        } catch {
+          await clearIntent().catch(() => undefined);
+          failed += 1;
+          continue;
+        }
       }
       if (tab) {
         opened += 1;
         openedIds.push(entry.id);
         if (tab.id != null) {
-          await recordJournalEntry(RESTORE_JOURNAL_KEY, entry.id, tab.id);
+          try {
+            await recordJournalEntry(RESTORE_JOURNAL_KEY, entry.id, tab.id);
+          } catch {
+            // auxiliary recording failed
+          }
         }
-        await clearIntent();
+        await clearIntent().catch(() => undefined);
       } else {
-        await clearIntent();
+        await clearIntent().catch(() => undefined);
         failed += 1;
       }
     }
@@ -1247,9 +1334,18 @@ export async function undoLastSave(): Promise<{
     const entries = db.entries.filter((e) => ids.includes(e.id));
     const openedIds: string[] = [];
     const failedIds: string[] = [];
-    const journal = await getJournal(UNDO_JOURNAL_KEY);
-    const restoreJournal = await getJournal(RESTORE_JOURNAL_KEY);
-    const pendingIntent = await getPendingIntent();
+    let journal: Record<string, number>;
+    let restoreJournal: Record<string, number>;
+    try {
+      journal = await getJournal(UNDO_JOURNAL_KEY);
+      restoreJournal = await getJournal(RESTORE_JOURNAL_KEY);
+    } catch (e) {
+      return {
+        ok: false,
+        message:
+          e instanceof Error ? e.message : STRINGS.journalReadUnavailable,
+      };
+    }
 
     for (const entry of entries) {
       const existingTabId =
@@ -1264,13 +1360,16 @@ export async function undoLastSave(): Promise<{
       }
 
       let adoptedTab: chrome.tabs.Tab | null = null;
-      if (
-        pendingIntent &&
-        pendingIntent.entryId === entry.id &&
-        pendingIntent.url === entry.url
-      ) {
-        if (typeof chrome !== "undefined" && chrome.tabs?.query) {
-          const openTabs = await chrome.tabs.query({});
+      if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+        try {
+          const res = chrome.tabs.query({});
+          const openTabs: chrome.tabs.Tab[] = (
+            res && typeof (res as Promise<unknown>).then === "function"
+              ? await (res as Promise<chrome.tabs.Tab[]>).catch(() => [])
+              : Array.isArray(res)
+                ? res
+                : []
+          ) as chrome.tabs.Tab[];
           const match = openTabs.find(
             (t) =>
               (t.url === entry.url || t.pendingUrl === entry.url) &&
@@ -1279,27 +1378,39 @@ export async function undoLastSave(): Promise<{
           if (match && match.id != null) {
             adoptedTab = match;
           }
+        } catch {
+          // ignore query failure
         }
       }
 
       let tab: chrome.tabs.Tab | null = adoptedTab;
       if (!tab) {
-        await recordIntent({
-          opId: "undo",
-          entryId: entry.id,
-          url: entry.url,
-          timestamp: Date.now(),
-        });
-        tab = await createTabSafe(entry);
+        try {
+          await recordIntent({
+            opId: "undo",
+            entryId: entry.id,
+            url: entry.url,
+            timestamp: Date.now(),
+          });
+          tab = await createTabSafe(entry);
+        } catch {
+          await clearIntent().catch(() => undefined);
+          failedIds.push(entry.id);
+          continue;
+        }
       }
       if (tab) {
         openedIds.push(entry.id);
         if (tab.id != null) {
-          await recordJournalEntry(UNDO_JOURNAL_KEY, entry.id, tab.id);
+          try {
+            await recordJournalEntry(UNDO_JOURNAL_KEY, entry.id, tab.id);
+          } catch {
+            // auxiliary recording failed
+          }
         }
-        await clearIntent();
+        await clearIntent().catch(() => undefined);
       } else {
-        await clearIntent();
+        await clearIntent().catch(() => undefined);
         failedIds.push(entry.id);
       }
     }
@@ -1454,7 +1565,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "restore-group": {
         if (typeof req.group !== "string") {
-          return { ok: false, error: "group must be a string." };
+          return { ok: false, error: STRINGS.groupMustBeString };
         }
         const mode = req.mode as unknown as string;
         if (mode !== undefined && mode !== "all" && mode !== "batch") {
@@ -1505,12 +1616,33 @@ export async function handleRequest(req: Request): Promise<Response> {
           // still allow reset
         }
         await s.resetAll();
+        for (const k of Object.keys(inMemoryJournals)) {
+          delete inMemoryJournals[k];
+        }
+        inMemoryIntent = null;
+        await clearConfirm();
+        if (typeof chrome !== "undefined" && chrome.storage?.session) {
+          try {
+            await chrome.storage.session.clear();
+          } catch {
+            await chrome.storage.session.remove([
+              "pendingConfirm",
+              "lastSaveResult",
+              "lastSaveAt",
+              DURABLE_UNDO_KEY,
+              INTENT_KEY,
+              RESTORE_JOURNAL_KEY,
+              UNDO_JOURNAL_KEY,
+              OPERATION_JOURNAL_KEY,
+            ]);
+          }
+        }
         await refreshBadgeFromDb();
         return { ok: true, data: { reset: true } };
       }
       case "patch-settings": {
         if (!req.patch || typeof req.patch !== "object") {
-          return { ok: false, error: "Invalid settings patch." };
+          return { ok: false, error: STRINGS.invalidSettingsPatch };
         }
         const allowedKeys = new Set([
           "removeAfterRestore",
@@ -1523,7 +1655,7 @@ export async function handleRequest(req: Request): Promise<Response> {
         ]);
         for (const k of Object.keys(req.patch)) {
           if (!allowedKeys.has(k)) {
-            return { ok: false, error: `Unknown settings key: ${k}` };
+            return { ok: false, error: STRINGS.unknownSettingsKey(k) };
           }
         }
         const patch = req.patch;
@@ -1531,13 +1663,13 @@ export async function handleRequest(req: Request): Promise<Response> {
           patch.removeAfterRestore !== undefined &&
           typeof patch.removeAfterRestore !== "boolean"
         ) {
-          return { ok: false, error: "removeAfterRestore must be boolean." };
+          return { ok: false, error: STRINGS.removeAfterRestoreBoolean };
         }
         if (
           patch.defaultScope !== undefined &&
           !isValidScope(patch.defaultScope)
         ) {
-          return { ok: false, error: "Invalid defaultScope." };
+          return { ok: false, error: STRINGS.invalidDefaultScope };
         }
         if (
           patch.theme !== undefined &&
@@ -1545,7 +1677,7 @@ export async function handleRequest(req: Request): Promise<Response> {
           patch.theme !== "dark" &&
           patch.theme !== "system"
         ) {
-          return { ok: false, error: "Invalid theme." };
+          return { ok: false, error: STRINGS.invalidTheme };
         }
         if (patch.whitelist !== undefined) {
           if (
@@ -1554,7 +1686,7 @@ export async function handleRequest(req: Request): Promise<Response> {
           ) {
             return {
               ok: false,
-              error: "whitelist must be an array of strings.",
+              error: STRINGS.whitelistMustBeStringArray,
             };
           }
         }
@@ -1562,7 +1694,7 @@ export async function handleRequest(req: Request): Promise<Response> {
           patch.onboardingComplete !== undefined &&
           typeof patch.onboardingComplete !== "boolean"
         ) {
-          return { ok: false, error: "onboardingComplete must be boolean." };
+          return { ok: false, error: STRINGS.onboardingCompleteBoolean };
         }
         if (
           patch.unsavedHintAcknowledged !== undefined &&
@@ -1570,7 +1702,7 @@ export async function handleRequest(req: Request): Promise<Response> {
         ) {
           return {
             ok: false,
-            error: "unsavedHintAcknowledged must be boolean.",
+            error: STRINGS.unsavedHintAcknowledgedBoolean,
           };
         }
         if (patch.restoreBatchSize !== undefined) {
@@ -1616,7 +1748,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "import-json": {
         if (typeof req.text !== "string") {
-          return { ok: false, error: "text must be a string." };
+          return { ok: false, error: STRINGS.textMustBeString };
         }
         let summary: ImportSummary = {
           added: 0,
@@ -1649,7 +1781,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "import-text": {
         if (typeof req.text !== "string") {
-          return { ok: false, error: "text must be a string." };
+          return { ok: false, error: STRINGS.textMustBeString };
         }
         let summary: ImportSummary = {
           added: 0,
@@ -1688,7 +1820,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "restore-backup": {
         if (typeof req.id !== "string" || !req.id.trim()) {
-          return { ok: false, error: "Invalid backup id." };
+          return { ok: false, error: STRINGS.invalidBackupId };
         }
         await s.restoreBackup(req.id);
         await refreshBadgeFromDb();
@@ -1716,10 +1848,10 @@ export async function handleRequest(req: Request): Promise<Response> {
       }
       case "discard-tab": {
         if (typeof req.tabId !== "number") {
-          return { ok: false, error: "Missing tabId." };
+          return { ok: false, error: STRINGS.missingTabId };
         }
         const tab = await chrome.tabs.get(req.tabId).catch(() => null);
-        if (!tab) return { ok: false, error: "Tab not found." };
+        if (!tab) return { ok: false, error: STRINGS.tabNotFound };
         if (tab.active) {
           return { ok: false, error: STRINGS.cannotHibernateActive };
         }

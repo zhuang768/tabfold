@@ -1,6 +1,6 @@
 # Known Limitations（已知限制）
 
-以下僅列**無法在代理人環境完整自動化**或**刻意產品架構取捨**；可修核心缺陷（並行遺失、Undo 被清、毀損靜默清空、sticky popup alarm、外連 favicon、空 scope 誤關、格式檢查鬆散、UI 競態、原型污染遺失、毀損回滾、雙重救援遺失、Service Worker 途中重啟開雙分頁、about:blank 導航丟失等）已在 Round 1 至 Round 5 完整修正完畢，不以此文件掩蓋可修 bug。
+以下僅列**無法在代理人環境完整自動化**或**刻意產品架構取捨**；可修核心缺陷（並行遺失、Undo 被清、毀損靜默清空、sticky popup alarm、外連 favicon、空 scope 誤關、格式檢查鬆散、UI 競態、原型污染遺失、毀損回滾、雙重救援遺失、Service Worker 途中重啟開雙分頁、about:blank 導航丟失、root schema 1.5 讀回拒絕、reset-all session 洩漏殘留、aux storage 失敗防盲目開頁、journal 讀取失敗防坍縮、durable Undo 回退入口、initial loading 視覺反饋等）已在 Round 1 至 Round 6 完整修正完畢，不以此文件掩蓋可修 bug。
 
 1. **Chrome 工作管理員節省前後 MB**：在 Round 5 監工以原生 Chrome Task Manager 實測觀察到：合成 64MiB 來源分頁儲存前佔用 96.5MB 工作程序、儲存關閉後該分頁程序確實完全釋放消失；擴充功能 Library + Worker 共用 PID 由 38.9MB 變為 44.5MB，CPU 顯示 0.0%（非絕對零，且有共用 PID 底層開銷，非精確等額總 RAM 節省）。UI「Est. ~N MB」仍為 `50MB × totalClosed` 靜態估計，手動實測操作步驟詳見 `docs/HANDS_ON_ONLY.md`。
 2. **系統 Chrome + Playwright `channel:'chromium'`**：E2E 採用官方無頭 Chromium，背景安靜執行。日常使用以使用者安裝的 Chrome（≥127）載入 `dist/` 為準。
