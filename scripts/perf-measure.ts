@@ -101,7 +101,7 @@ try {
   const searchMs = Number((performance.now() - tSearch0).toFixed(2));
   const filteredCount = await page.locator(".entry").count();
 
-  // Popup open-to-interactive: wait until JS init populates button text and listeners
+  // Extension Tab DOM readiness predicate: wait until JS init populates elements and removes loading
   const rawPopupSamples: number[] = [];
   for (let i = 0; i < 30; i++) {
     const p = await context.newPage();
@@ -109,7 +109,7 @@ try {
     await p.goto(`chrome-extension://${extensionId}/popup.html`, {
       waitUntil: "domcontentloaded",
     });
-    // Verify true interactive ready: scope populated, count rendered, loading gone, list populated
+    // Verify Extension Tab DOM readiness predicate: scope populated, count rendered, loading gone, list populated
     await p.waitForFunction(
       () => {
         const scope = document.getElementById("scope") as HTMLSelectElement;
@@ -141,7 +141,7 @@ try {
     measuredAt: new Date().toISOString(),
     browser: "Playwright Chromium (bundled)",
     conditions:
-      "1000 imported entries, headless Chromium, 30 sequential popup samples measuring true interactive ready init",
+      "1000 imported entries, headless Chromium, 30 sequential popup samples measuring Extension Tab DOM readiness predicate (elements populated, loading removed; distinct from native OS click / action handler execution)",
     entryCountRendered: entryCount,
     filteredCountAfterSearch: filteredCount,
     popupOpenToSaveInteractiveMs: {
@@ -151,7 +151,7 @@ try {
       p95,
       targetMs: 200,
       scope:
-        "Extension Page Tab (popup.html emulation in tab; not native Chrome browser action bubble)",
+        "Extension Page Tab (popup.html loaded in tab; evaluates DOM readiness predicate, distinct from native Chrome browser action bubble / user click handler execution)",
     },
     searchMs,
     scrollMs,

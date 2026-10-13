@@ -2478,9 +2478,14 @@ describe("Round 5 formal regressions (R501–R510)", () => {
       });
       const origSet = chrome.storage.session.set;
       let heldFirst = true;
+      let setEntered: () => void = () => {};
+      const atOldSet = new Promise<void>((r) => {
+        setEntered = r;
+      });
       chrome.storage.session.set = async (items: Record<string, unknown>) => {
         if (heldFirst && Object.hasOwn(items, "lastSaveResult")) {
           heldFirst = false;
+          setEntered();
           await oldSetHold;
         }
         return origSet(items);
@@ -2495,8 +2500,31 @@ describe("Round 5 formal regressions (R501–R510)", () => {
         active: true,
       } as chrome.tabs.Tab);
 
-      await handleRequest({ type: "reset-all" });
+      // Verify old callback reaches session.set with lastSaveResult before reset-all
+      await atOldSet;
+
+      // Initiate reset-all and verify reset is legitimately pending while publication is held
+      const resetPromise = handleRequest({ type: "reset-all" });
+      const resetTiming = await Promise.race([
+        resetPromise.then((res) => ({
+          completedWhileHeld: true,
+          pendingWhileHeld: false,
+          res,
+        })),
+        new Promise<{ completedWhileHeld: boolean; pendingWhileHeld: boolean }>(
+          (r) =>
+            setTimeout(
+              () => r({ completedWhileHeld: false, pendingWhileHeld: true }),
+              25,
+            ),
+        ),
+      ]);
+      expect(resetTiming.pendingWhileHeld).toBe(true);
+
+      // Release publication, reset completes cleanly, then old call settles
       releaseOldSet();
+      const resetResult = await resetPromise;
+      expect(resetResult.ok).toBe(true);
       await oldCallPromise;
 
       const postResetSession = await chrome.storage.session.get("all");
@@ -2528,6 +2556,208 @@ describe("Round 5 formal regressions (R501–R510)", () => {
       expect((finalSession.lastSaveResult as { closed: number }).closed).toBe(
         1,
       );
+      setStoreForTests(null);
+    });
+
+    it("R901: onActionClicked held at first setPopup await aborts and does not recreate pending confirmation after reset", async () => {
+      const base = memoryDriver({
+        tabfold_database: {
+          ...createEmptyDatabase(),
+          settings: {
+            ...createEmptyDatabase().settings,
+            onboardingComplete: false,
+            unsavedHintAcknowledged: false,
+          },
+        },
+      });
+      mock([
+        {
+          id: 1,
+          url: "https://reset-first-await-tab.test/",
+          title: "First Await Tab",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+          audible: false,
+        },
+      ]);
+      setStoreForTests(new LibraryStore(base));
+
+      let releasePopup: () => void = () => {};
+      const holdPopup = new Promise<void>((r) => {
+        releasePopup = r;
+      });
+      let enteredPopup: () => void = () => {};
+      const atFirstPopup = new Promise<void>((r) => {
+        enteredPopup = r;
+      });
+      let firstPopup = true;
+      const origSetPopup = chrome.action.setPopup;
+      chrome.action.setPopup = async (details: chrome.action.PopupDetails) => {
+        if (firstPopup) {
+          firstPopup = false;
+          enteredPopup();
+          await holdPopup;
+        }
+        return origSetPopup(details);
+      };
+
+      const actionPromise = onActionClicked({
+        id: 1,
+        url: "https://reset-first-await-tab.test/",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+      } as chrome.tabs.Tab);
+
+      await atFirstPopup;
+      const resetRes = await handleRequest({ type: "reset-all" });
+      expect(resetRes.ok).toBe(true);
+
+      releasePopup();
+      await actionPromise;
+
+      const sessionAfter = await chrome.storage.session.get("all");
+      expect(sessionAfter.pendingConfirm).toBeUndefined();
+      expect(sessionAfter.lastSaveResult).toBeUndefined();
+
+      setStoreForTests(null);
+    });
+
+    it("R902: createBackup and restoreBackup deep-verify historical snapshots and salvage records, rolling back to preserve prior history on dropped items", async () => {
+      const oldHistoryDb = {
+        ...createEmptyDatabase(),
+        entries: [
+          {
+            schemaVersion: 2,
+            id: "old-history-entry",
+            url: "https://old-history-entry.test/",
+            title: "Old History",
+            favicon: null,
+            savedAt: 1,
+            source: { windowId: 1, index: 0, pinned: false },
+            group: "",
+            tags: [],
+            status: "saved" as const,
+          },
+        ],
+      };
+      const currentDb = {
+        ...createEmptyDatabase(),
+        entries: [
+          {
+            schemaVersion: 2,
+            id: "current-entry",
+            url: "https://current-entry.test/",
+            title: "Current Entry",
+            favicon: null,
+            savedAt: 2,
+            source: { windowId: 1, index: 0, pinned: false },
+            group: "",
+            tags: [],
+            status: "saved" as const,
+          },
+        ],
+      };
+      const base1 = memoryDriver({
+        tabfold_database: currentDb,
+        tabfold_backups: [
+          {
+            id: "old-history-snap",
+            createdAt: 1,
+            reason: "test",
+            database: oldHistoryDb,
+          },
+        ],
+      });
+      const driver1 = {
+        ...base1,
+        set: async (items: Record<string, unknown>) => {
+          const copy = structuredClone(items);
+          if (
+            Array.isArray(copy.tabfold_backups) &&
+            copy.tabfold_backups.length > 1
+          ) {
+            copy.tabfold_backups = copy.tabfold_backups.slice(0, 1);
+          }
+          return base1.set(copy);
+        },
+      };
+      setStoreForTests(new LibraryStore(driver1));
+      const clearRes = await handleRequest({ type: "clear" });
+      expect(clearRes.ok).toBe(false);
+      const afterClear = await base1.get([
+        "tabfold_database",
+        "tabfold_backups",
+      ]);
+      expect(
+        JSON.stringify(afterClear).includes("https://old-history-entry.test/"),
+      ).toBe(true);
+
+      const priorRaw = {
+        schemaVersion: 2,
+        entries: null,
+        uniqueRaw: "PRIOR-SALVAGE-RAW",
+      };
+      const chosenDb = {
+        ...createEmptyDatabase(),
+        entries: [
+          {
+            schemaVersion: 2,
+            id: "chosen-entry",
+            url: "https://chosen-entry.test/",
+            title: "Chosen Entry",
+            favicon: null,
+            savedAt: 3,
+            source: { windowId: 1, index: 0, pinned: false },
+            group: "",
+            tags: [],
+            status: "saved" as const,
+          },
+        ],
+      };
+      const base2 = memoryDriver({
+        tabfold_database: currentDb,
+        tabfold_salvage: [priorRaw],
+        tabfold_backups: [
+          {
+            id: "chosen-snap",
+            createdAt: 1,
+            reason: "test",
+            database: chosenDb,
+          },
+        ],
+      });
+      const driver2 = {
+        ...base2,
+        set: async (items: Record<string, unknown>) => {
+          const copy = structuredClone(items);
+          if (
+            Array.isArray(copy.tabfold_salvage) &&
+            copy.tabfold_salvage.length > 1
+          ) {
+            copy.tabfold_salvage = copy.tabfold_salvage.slice(-1);
+          }
+          return base2.set(copy);
+        },
+      };
+      setStoreForTests(new LibraryStore(driver2));
+      const restoreRes = await handleRequest({
+        type: "restore-backup",
+        id: "chosen-snap",
+      });
+      expect(restoreRes.ok).toBe(true);
+      const afterRestore = await base2.get([
+        "tabfold_salvage",
+        "tabfold_backups",
+        "tabfold_database",
+      ]);
+      expect(JSON.stringify(afterRestore).includes("PRIOR-SALVAGE-RAW")).toBe(
+        true,
+      );
+
       setStoreForTests(null);
     });
   });

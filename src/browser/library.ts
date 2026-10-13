@@ -2162,6 +2162,7 @@ export async function onActionClicked(tab: chrome.tabs.Tab): Promise<void> {
   const currentEpoch = resetEpoch;
   // Ensure next click stays on onClicked (no sticky popup)
   await chrome.action.setPopup({ popup: "" });
+  if (currentEpoch !== resetEpoch) return;
 
   const saveOpts: Parameters<typeof saveTabs>[0] = { scope: "current" };
   if (tab.id != null) saveOpts.tabId = tab.id;

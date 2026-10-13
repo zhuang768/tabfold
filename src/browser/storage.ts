@@ -496,15 +496,16 @@ export class LibraryStore {
 
     const verify = await this.driver.get([BACKUPS_KEY]);
     const readList = verify[BACKUPS_KEY];
-    if (!Array.isArray(readList)) {
-      throw new Error(STRINGS.backupReadbackFailed);
-    }
-    const verifiedSnap = readList.find((s: Snapshot) => s && s.id === snap.id);
-    if (
-      !verifiedSnap ||
-      verifiedSnap.reason !== snap.reason ||
-      !deepEqual(verifiedSnap.database, snap.database)
-    ) {
+    if (!Array.isArray(readList) || !deepEqual(readList, next)) {
+      try {
+        if (existing.length > 0) {
+          await this.driver.set({ [BACKUPS_KEY]: existing });
+        } else {
+          await this.driver.remove([BACKUPS_KEY]);
+        }
+      } catch {
+        // best effort rollback
+      }
       throw new Error(STRINGS.backupReadbackFailed);
     }
   }
@@ -535,25 +536,37 @@ export class LibraryStore {
     if (currentRaw != null) {
       let salvageOk = false;
       let backupOk = false;
-      const nextSalvage = appendSalvage(data[SALVAGE_KEY], currentRaw);
+      const existingSalvage = data[SALVAGE_KEY];
+      const nextSalvage = appendSalvage(existingSalvage, currentRaw);
       try {
         await this.driver.set({
           [SALVAGE_KEY]: nextSalvage,
         });
         const verifySalvage = await this.driver.get([SALVAGE_KEY]);
         const sVal = verifySalvage[SALVAGE_KEY];
-        const rawJson = JSON.stringify(currentRaw);
-        if (
-          Array.isArray(sVal) &&
-          sVal.some(
-            (item) =>
-              deepEqual(item, currentRaw) || JSON.stringify(item) === rawJson,
-          )
-        ) {
+        if (Array.isArray(sVal) && deepEqual(sVal, nextSalvage)) {
           salvageOk = true;
+        } else {
+          try {
+            if (existingSalvage != null) {
+              await this.driver.set({ [SALVAGE_KEY]: existingSalvage });
+            } else {
+              await this.driver.remove([SALVAGE_KEY]);
+            }
+          } catch {
+            // best effort
+          }
         }
       } catch {
-        // salvage write/verify failed
+        try {
+          if (existingSalvage != null) {
+            await this.driver.set({ [SALVAGE_KEY]: existingSalvage });
+          } else {
+            await this.driver.remove([SALVAGE_KEY]);
+          }
+        } catch {
+          // best effort
+        }
       }
 
       try {
@@ -568,20 +581,29 @@ export class LibraryStore {
         await this.driver.set({ [BACKUPS_KEY]: next });
         const verifyBackups = await this.driver.get([BACKUPS_KEY]);
         const bVal = verifyBackups[BACKUPS_KEY];
-        if (Array.isArray(bVal)) {
-          const verifiedSnap = bVal.find(
-            (s: Snapshot) => s && s.id === snap.id,
-          );
-          if (
-            verifiedSnap &&
-            verifiedSnap.reason === snap.reason &&
-            deepEqual(verifiedSnap.database, snap.database)
-          ) {
-            backupOk = true;
+        if (Array.isArray(bVal) && deepEqual(bVal, next)) {
+          backupOk = true;
+        } else {
+          try {
+            if (existing.length > 0) {
+              await this.driver.set({ [BACKUPS_KEY]: existing });
+            } else {
+              await this.driver.remove([BACKUPS_KEY]);
+            }
+          } catch {
+            // best effort
           }
         }
       } catch {
-        // if corrupt or write failed
+        try {
+          if (existing.length > 0) {
+            await this.driver.set({ [BACKUPS_KEY]: existing });
+          } else {
+            await this.driver.remove([BACKUPS_KEY]);
+          }
+        } catch {
+          // best effort
+        }
       }
 
       if (!salvageOk && !backupOk) {

@@ -1,7 +1,7 @@
 # TEST_REPORT.md — Tabfold 測試報告
 
 **日期：** 2026-10-13（環境：macOS darwin，Node v26.3.0 / npm 11.16.0）  
-**範圍：** Round-8 完整修正後（候選 `56e5fa121858b0a1d4ec57f3e1cce4d274b365a4`，覆蓋 R801–R810、R701–R714、R601–R614、R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
+**範圍：** Round-9 完整修正後（基線候選 `a5c6e059172d5a57a12e3f19802d43bf00f95b3b`，覆蓋 R901–R906、R801–R810、R701–R714、R601–R614、R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
 
 ## 指令與結果摘要
 
@@ -11,17 +11,18 @@
 | `npm run format:check`                                                                                  | 0         | Prettier 格式檢查全部通過                                                                                                                                                                                                                                                                  |
 | `npm run typecheck`                                                                                     | 0         | TypeScript 型別嚴格檢查通過（0 errors, `tsc --noEmit`）                                                                                                                                                                                                                                   |
 | `npm run lint`                                                                                          | 0         | ESLint 0 warnings / 0 errors（`--max-warnings 0`）                                                                                                                                                                                                                                         |
-| `npm run test`                                                                                          | 0         | **87** 個單元測試全數通過（含 R801–R805 備份深比較驗證、pending Save unknown 區分、partial durable Undo 失敗項 TTL 內重試、Reset 在途發表序列化、Library transport 失敗保留有效重試入口，以及 R701–R710、R601–R614 核心與 UI 時序回歸，0 fail, 0 skip）                                |
+| `npm run test`                                                                                          | 0         | **89** 個單元測試全數通過（含 R901–R903 第一 await 後重置檢查、歷史備份/救援完整性深比與安全回滾、在途發表抵達與 Reset pending 序列驗證，以及 R801–R805、R701–R710、R601–R614 核心與 UI 時序回歸，0 fail, 0 skip）                                                                        |
 | `npm run build`                                                                                         | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                                                                                                                                                                                                                         |
 | `npm run test:e2e`                                                                                      | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、無痕權限、原型 ID Restore/Undo、CDP Worker 停重啟，0 fail, 0 flaky）                                                                                                                                                          |
 | `npm run test:perf`                                                                                     | 0         | 產出 `output/perf/perf-samples.json`（p50=136.27ms, p95=188.82ms ≤ 200ms）                                                                                                                                                                                                                 |
 | `npm run pack`                                                                                          | 0         | `tabfold-extension.zip` 封裝完成且 20 個 runtime 檔案內容與 `dist/` 逐檔一致                                                                                                                                                                                                               |
 | `npm audit`                                                                                             | 0         | **0** vulnerabilities（標準 lockfile，無 dead override）                                                                                                                                                                                                                                   |
+| `TSX_DISABLE_CACHE=1 node --import tsx output/engineer/round-9/attempt-1/core-new-boundaries-attempt-1.mjs` | 0         | **2** 項 Round 9 核心受控新邊界斷言全數通過（R9-RESET-BEFORE-FIRST-POPUP-AWAIT-RESUMES, R9-EXPECTED-BACKUP-AND-SALVAGE-HISTORY-READBACK；0 fail, 0 harness error）                                                                                                                       |
 | `TSX_DISABLE_CACHE=1 node --import tsx output/engineer/round-8/attempt-1/core-focused-new-attempt-1.mjs` | 0         | **4** 項 Round 8 核心受控邊界斷言全數通過（R8-BACKUP-SAME-ID-WRONG-CONTENT, R8-PENDING-SAVE-UNKNOWN-GET-IS-NOT-CLOSED, R8-PARTIAL-DURABLE-UNDO-RETRY-ORIGINAL-TTL, R8-RESET-OLD-CLEANUP-CANNOT-DELETE-NEW-RESULT；0 fail, 0 harness error）                                                |
 | `node output/engineer/round-8/attempt-1/ui-cache-error-attempt-1.mjs`                                   | 0         | **14** 項 Round 8 UI 權威與快取錯誤斷言全數通過（確證 Library 與 Popup 在 Undo transport 拒絕後保留可見錯誤並維持 unexpired retry 按鈕入口，0 fail, 0 harness error）                                                                                                                    |
 | `node --import tsx output/engineer/round-7/attempt-2/hibernate-direct-cdp-attempt1.mjs`                 | 0         | **7** 項官方 Chrome headless 原生 CDP Hibernate 斷言全數通過（無 viewport 模擬，真 DOM 操作，native discarded=true，保留視窗/Index/URL，無 Save/Close 假計數，重新啟用精確還原，0 error，完整清理）                                                                                    |
 
-## 單元測試（87 項安全與核心契約）
+## 單元測試（89 項安全與核心契約）
 
 - **基礎範圍與操作（Scope & URL）**：
   - `current`、`others`、`window` 正確選取分頁，排除內部頁面與危險 scheme
@@ -108,6 +109,13 @@
   - R803: partial durable Undo 失敗項目保留有效權威與原 `expiresAt`，成功項目自資料庫移除，失敗項目維持在 DB 與 durable undo 中，允許在原 TTL 內重試復原。
   - R804: `onActionClicked` / `handleContextMenuSave` 與 `reset-all` 之 session 發表透過 `withSessionPublication` 循序串列化，單調紀元變更時直接取消發表，徹底消除舊 callback 延遲清理誤刪新 Save 結果的競態。
   - R805: UI (`list.ts` / `popup.ts`) 在 Undo transport 拒絕後保留可見錯誤提示，並維持未消耗之有效 Undo 按鈕入口，允許使用者在 TTL 內直接重試。
+- **Round 9 紀元邊界檢查、歷史備份深比較、發表停點到達與文件精確校準（R901–R906）**：
+  - R901: `onActionClicked` 在首個 `await chrome.action.setPopup({ popup: "" })` 返回後立即校驗 `currentEpoch !== resetEpoch`，若期間已觸發公共 Reset 則即時中止，徹底防止已完成 Reset 後被舊 action 重新寫入敏感 `pendingConfirm`。
+  - R902: `createBackupUnlocked` 與 `restoreBackupUnlocked` 針對全部依法應保留之 `next` snapshots 陣列及 `nextSalvage` 陣列執行完整的 `deepEqual` 深比較（含所有 metadata、歷史/未知 raw 欄位與順序）。若儲存層注入 drop 歷史條目，立即安全寫回記憶體中持有的原歷史與 raw 記錄，並明確拋錯阻斷破壞性 clear / restore。
+  - R903: 正式單元測試 `R804` 精確等待 `atOldSet` 進入 hold 狀態，斷言 `resetTiming.pendingWhileHeld === true`，合法釋放 hold 後再等待 Reset 完成並驗證新 Save 成功，消除時序交錯覆蓋缺口。
+  - R904: 文件與指標精確對齊候選 `a5c6e059172d5a57a12e3f19802d43bf00f95b3b`，明確切分 Extension Tab DOM readiness predicate、1,000 筆搜尋耗時、Task Manager PID 77535/77538 程序釋放事實與原生 Action Bubble 首互動上界延遲。
+  - R905: `docs/RESEARCH.md` 引用 TW_Tones（2021-11-06）第一手使用者匯出操作紀錄，說明 `url | title` 慣例，載明 2026-10-13 檢索之搜尋索引正文與 HTTP 403 直接連線限制，並連繫專案 parser 測試 fixture。
+  - R906: `PRIVACY.md` 準確區分 12 秒 Durable Undo 有效期（`UNDO_TTL_MS = 12000`）、到期請求拒絕與實體保留週期、中斷狀態留待恢復，並釐清 `withSessionPublication` 為執行域內 Promise 佇列而非 session 儲存鍵。
 
 ## E2E 整合測試（5 項無頭 Chromium 測試）
 
@@ -131,22 +139,24 @@
 
 根據 `npm run test:perf`（產出於 `output/perf/perf-samples.json`）與監工獨立量測：
 
-- **Popup 可操作互動時間（Interactive Ready）**：
-  - 測量口徑說明：Extension Page Tab（popup.html 在一般分頁中模擬載入；自動化無頭環境無法直接點擊系統工作列之原生 Chrome Action Bubble）。
-  - 條件：30 次連續樣本，嚴格檢查 Scope 載入完成、計數呈現、Loading 隱藏、條目清單繪製。
+- **Popup 頁面載入判定（Extension Tab DOM Readiness Predicate）**：
+  - 測量口徑說明：Extension Page Tab（popup.html 在一般分頁中載入；自動化環境評估 DOM readiness 判定條件：scope 下拉選單、計數文字、loading class 隱藏、entry 清單渲染；非原生 Chrome browser action bubble 使用者點擊 handler）。
+  - 樣本條件：30 次連續樣本。
   - 工程師實跑（`output/perf/perf-samples.json`）：p50=**136.27 ms**，p95=**188.82 ms**（目標 ≤ 200 ms）。
-  - 監工獨立測量（`output/supervision/round-8/perf-independent-attempt1/perf-samples.json`）：30 DOM-ready 樣本 p50=**133.08 ms**，p95=**188.1 ms**（全數 ≤ 200 ms）。
+  - 監工獨立測量（受驗候選 `a5c6e05`，`output/supervision/round-9`）：30 樣本 p50=**131.48 ms**，p95=**169.66 ms**（0 > 200ms）。歷史候選 `56e5fa1` 獨立測量為 p50=**133.08 ms**，p95=**188.1 ms**。
   - 原始規格之 200ms 為設計追求的互動響應目標，非所有 cold-start 樣本在任何硬體下之絕對硬性截斷門檻。
 - **1,000 筆資料庫搜尋與滾動**：
   - 工程師實跑：搜尋結果計算與 DOM 收斂 **25.82 ms**，滾動時間 **24.16 ms**（滾動高度 78,543 px），JS Heap 使用約 **3.76 MB**（3,757,375 bytes），DOM 節點 11,263 nodes。
-  - 監工獨立測量：1,000 筆渲染，搜尋精確 1 條目 **23.06 ms**，JS Heap 約 **2.60 MB**（2,596,804 bytes），連續 133 幀 rAF 期間無 long tasks 與無 long-animation-frames。
+  - 監工獨立測量（受驗候選 `a5c6e05`）：1,000 筆條目，精確搜尋 1 條目 **33.46 ms**，JS Heap 約 **2.60 MB**（2,596,851 bytes），連續 133 幀 rAF 期間無 long tasks 與無 long-animation-frames。
 - **原生 Action Bubble 與 Chrome Task Manager 實測觀察**：
   - 原生 Action Bubble 啟動受 Chrome 原生擴充功能通訊、背景 Service Worker 喚醒與 CDP 本身連線開銷影響，測量時鐘包含 API 發起、CDP discovery/attach 與 5ms 觀測週期，不應與純頁面渲染時鐘混淆（詳見 `docs/KNOWN_LIMITATIONS.md`）。
-  - **Chrome Task Manager 有效前後配對（監工獨立實測 `native-memory-valid-summary.json`）**：合成 64MiB 來源分頁（PID 71148）儲存前佔用 95.2 MB 工作程序，真 nativeToolbar Save 關閉後該來源程序確實完全釋放消失；擴充功能主進程 Library + Worker 共用 PID（71104）由 43.9 MB 微幅調整至 46.4 MB，CPU 顯示 0.0%。此反映單一來源分頁之確切記憶體釋放，非全瀏覽器 OS RAM 總額保證。
-  - **原生 POPUP 首互動上界（監工獨立實測 `native-popup-first-interaction-attempt3-result.json` & attempt4）**：
-    - 連續條件（attempt3）：3 筆條目 p50 約 31.0 ms、p95 330.6 ms（1 > 200ms）；1,000 筆條目 p50 393.4 ms、p95 533.1 ms（5 > 200ms）。其中部分 Chrome 擴充功能原生 API 開啟延遲本身即約 280–299 ms。
-    - 500ms 間隔條件（attempt4）：3 筆條目 p50 309.4 ms、p95 324.3 ms；1,000 筆條目 p50 454.7 ms、p95 499.6 ms。
-    - 此數據包含 API 發起至觀察可操作之上界（含 CDP 開銷），功能 100% 通過，但不作為精準 OS 點擊延遲小於 200ms 的硬性宣稱。
+  - **Chrome Task Manager 有效前後配對（監工獨立實測 `native-memory-valid-summary.json`）**：
+    - Round 9 實測（受驗候選 `a5c6e05`）：合成 64MiB 來源分頁（PID 77535）儲存前佔用 96.5 MB 工作程序，真 nativeToolbar Save 關閉後該來源程序確實完全釋放消失；擴充功能主進程 Library（PID 77538）由 39.6 MB 微調至 46.2 MB，CPU 顯示 0.0%（Round 9 僅有 Library 項目，未確立 Worker 共用 PID；此反映特定受測來源分頁關閉之程序釋放，非全瀏覽器所有網站精確等額總 RAM 節省或長期 OS CPU 歸零保證）。
+    - 歷史 Round 8 實測（候選 `56e5fa1`）：合成 64MiB 來源分頁（PID 71148）儲存前佔用 95.2 MB 工作程序，關閉後程序釋放消失；主進程 Library + Worker 共用 PID（71104）由 43.9 MB 調整至 46.4 MB，CPU 顯示 0.0%。
+  - **原生 POPUP 首互動上界（監工獨立實測 `native-popup-first-interaction`）**：
+    - Round 9 實測（受驗候選 `a5c6e05`，20 次首 Search handler 執行）：3 筆條目 p50 約 42.8 ms、p95 294.8 ms（1 > 200ms）；1,000 筆條目 p50 141.4 ms、p95 471.8 ms（2 > 200ms）。
+    - 歷史 Round 8 實測：attempt3（3 筆 p50~31ms/p95 330.6ms；1000 筆 p50 393.4ms/p95 533.1ms）；attempt4（3 筆 p50 309.4ms/p95 324.3ms；1000 筆 p50 454.7ms/p95 499.6ms）。
+    - 此數據包含 API 發起至觀察首互動 handler 完成之上界（含 CDP 開銷），功能 100% 通過，但不作為精準 OS 點擊延遲小於 200ms 的硬性宣稱。
   - 歷史 134 幀觀測中記錄之 1 個 165.5ms long-animation-frame 僅代表該次繪製週期長度，無歸因資料，不作首幀 paint 因果宣稱。
 
 ## 儲存容量實測（真實 Chrome getBytesInUse）
