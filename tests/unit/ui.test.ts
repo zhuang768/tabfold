@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import * as esbuild from "esbuild";
+import { STRINGS } from "../../src/strings.js";
 
 class El {
   tagName: string;
@@ -753,4 +754,175 @@ describe("UI State, Timing & Isolation Regressions (R409–R414)", () => {
       );
     });
   }
+
+  it("popup: distinguishes total 0 empty state from filtered 0 search state (R907)", async () => {
+    let db = {
+      ...mkDb(),
+      entries: [] as ReturnType<typeof mkDb>["entries"],
+    };
+    const ui = await setup(
+      "src/ui/popup.ts",
+      "init,load,getDatabase:()=>database",
+      async (req) => {
+        if (req.type === "get-state") {
+          return { ok: true, data: { database: db, backups: [] } };
+        }
+        if (req.type === "list-window-tabs") {
+          return { ok: true, data: { tabs: [] } };
+        }
+        return { ok: true, data: {} };
+      },
+    );
+
+    // 1. Total 0: shows emptyTitle and emptyBody
+    await ui.a.init();
+    const listEl = ui.get("list");
+    expect(listEl.children.length).toBe(1);
+    const emptyDiv = listEl.children[0] as El;
+    expect(emptyDiv.className).toBe("empty");
+    expect(emptyDiv.children[0]?.textContent).toBe(STRINGS.emptyTitle);
+    expect(emptyDiv.children[1]?.textContent).toBe(STRINGS.emptyBody);
+
+    // 2. Database with 3 entries
+    db = {
+      ...mkDb(),
+      entries: [
+        {
+          schemaVersion: 2,
+          id: "e1",
+          url: "https://example.test/alpha",
+          title: "Alpha Tab",
+          favicon: null,
+          savedAt: 1700000000000,
+          source: { windowId: 1, index: 0, pinned: false },
+          group: "work",
+          tags: [],
+          status: "saved",
+        },
+        {
+          schemaVersion: 2,
+          id: "e2",
+          url: "https://example.test/beta",
+          title: "Beta Tab",
+          favicon: null,
+          savedAt: 1700000001000,
+          source: { windowId: 1, index: 1, pinned: false },
+          group: "",
+          tags: [],
+          status: "saved",
+        },
+        {
+          schemaVersion: 2,
+          id: "e3",
+          url: "https://example.test/gamma",
+          title: "Gamma Tab",
+          favicon: null,
+          savedAt: 1700000002000,
+          source: { windowId: 1, index: 2, pinned: false },
+          group: "",
+          tags: [],
+          status: "saved",
+        },
+      ],
+      stats: { totalClosed: 3, totalRestored: 0, totalImported: 0 },
+    };
+    await ui.a.load();
+    expect(ui.get("list").children.length).toBe(3);
+    expect(ui.get("count").textContent).toContain("3/3");
+
+    // 3. Search query yielding 0 matches ("shortcut")
+    ui.get("search").value = "shortcut";
+    await ui.get("search").emit("input", { target: ui.get("search") });
+    expect(ui.get("list").children.length).toBe(1);
+    const filteredEmptyDiv = ui.get("list").children[0] as El;
+    expect(filteredEmptyDiv.className).toBe("empty");
+    expect(filteredEmptyDiv.children[0]?.textContent).toBe(
+      STRINGS.noMatchingTabs,
+    );
+    expect(filteredEmptyDiv.children.length).toBe(1); // no emptyBody
+    expect(ui.get("count").textContent).toContain("0/3");
+
+    // 4. Clear search query
+    ui.get("search").value = "";
+    await ui.get("search").emit("input", { target: ui.get("search") });
+    expect(ui.get("list").children.length).toBe(3);
+    expect(ui.get("count").textContent).toContain("3/3");
+  });
+
+  it("list: distinguishes total 0 empty state from filtered 0 search and group filter states (R907)", async () => {
+    let db = {
+      ...mkDb(),
+      entries: [] as ReturnType<typeof mkDb>["entries"],
+    };
+    const ui = await setup(
+      "src/ui/list.ts",
+      "init,load,paint,getDatabase:()=>database",
+      async (req) => {
+        if (req.type === "get-state") {
+          return { ok: true, data: { database: db, backups: [] } };
+        }
+        if (req.type === "list-window-tabs") {
+          return { ok: true, data: { tabs: [] } };
+        }
+        return { ok: true, data: {} };
+      },
+    );
+
+    // 1. Total 0: shows emptyTitle
+    await ui.a.init();
+    const listEl = ui.get("list");
+    expect(listEl.children.length).toBe(1);
+    const emptyDiv = listEl.children[0] as El;
+    expect(emptyDiv.className).toBe("empty");
+    expect(emptyDiv.textContent).toBe(STRINGS.emptyTitle);
+
+    // 2. Database with entries
+    db = {
+      ...mkDb(),
+      entries: [
+        {
+          schemaVersion: 2,
+          id: "e1",
+          url: "https://example.test/alpha",
+          title: "Alpha Tab",
+          favicon: null,
+          savedAt: 1700000000000,
+          source: { windowId: 1, index: 0, pinned: false },
+          group: "research",
+          tags: [],
+          status: "saved",
+        },
+      ],
+    };
+    await ui.a.load();
+    expect(ui.get("list").children.length).toBe(1);
+
+    // 3. Search query yielding 0 matches
+    ui.get("search").value = "nonexistent-query";
+    await ui.get("search").emit("input", { target: ui.get("search") });
+    expect(ui.get("list").children.length).toBe(1);
+    const searchEmptyDiv = ui.get("list").children[0] as El;
+    expect(searchEmptyDiv.textContent).toBe(STRINGS.noMatchingTabs);
+
+    // 4. Clear search query
+    ui.get("search").value = "";
+    await ui.get("search").emit("input", { target: ui.get("search") });
+    expect(ui.get("list").children.length).toBe(1);
+
+    // 5. Group filter yielding 0 matches
+    ui.get("group-filter").value = "nonexistent-group";
+    await ui.get("group-filter").emit("change", {
+      target: ui.get("group-filter"),
+    });
+    expect(ui.get("list").children.length).toBe(1);
+    const groupEmptyDiv = ui.get("list").children[0] as El;
+    expect(groupEmptyDiv.textContent).toBe(STRINGS.noMatchingTabs);
+
+    // 6. Reset group filter
+    ui.get("group-filter").value = "";
+    await ui.get("group-filter").emit("change", {
+      target: ui.get("group-filter"),
+    });
+    expect(ui.get("list").children.length).toBe(1);
+  });
 });

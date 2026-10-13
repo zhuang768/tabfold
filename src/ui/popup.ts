@@ -156,11 +156,17 @@ function renderList(entries: SavedTab[]): void {
     const empty = document.createElement("div");
     empty.className = "empty";
     const t = document.createElement("p");
-    t.textContent = STRINGS.emptyTitle;
-    const b = document.createElement("p");
-    b.className = "muted";
-    b.textContent = STRINGS.emptyBody;
-    empty.append(t, b);
+    const totalCount = database?.entries.length ?? 0;
+    if (totalCount > 0) {
+      t.textContent = STRINGS.noMatchingTabs;
+      empty.append(t);
+    } else {
+      t.textContent = STRINGS.emptyTitle;
+      const b = document.createElement("p");
+      b.className = "muted";
+      b.textContent = STRINGS.emptyBody;
+      empty.append(t, b);
+    }
     list.append(empty);
     return;
   }
@@ -626,7 +632,19 @@ async function init(): Promise<void> {
   $("search").addEventListener("input", (e) => {
     query = (e.target as HTMLInputElement).value;
     if (!database) return;
-    renderList(sortEntriesNewestFirst(searchEntries(database.entries, query)));
+    const filtered = sortEntriesNewestFirst(
+      searchEntries(database.entries, query),
+    );
+    renderList(filtered);
+    const mb = estimateMemoryFreedMb(database.stats.totalClosed);
+    text(
+      $("count"),
+      STRINGS.footerCount(
+        filtered.length,
+        database.entries.length,
+        STRINGS.estimatedMemoryClosed(mb),
+      ),
+    );
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "/" && document.activeElement?.tagName !== "INPUT") {

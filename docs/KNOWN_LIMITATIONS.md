@@ -1,8 +1,8 @@
 # Known Limitations（已知限制）
 
-以下僅列**無法在代理人環境完整自動化**或**刻意產品架構取捨**；可修核心缺陷（Round 1 至 Round 8 已修各項邊界，以及 Round 9 修復之：onActionClicked 首個 await 紀元檢查防止 Reset 後舊 action 重建 pendingConfirm、createBackup 與 restoreBackup 完整歷史快照與 salvage 記錄深比較防 dropped 資料、R804 停點確實到達之合法序列化控制、OneTab 第一手使用來源追溯、12 秒 Durable Undo 有效期與實體保留精確說明等）已在 Round 1 至 Round 9 完整修正完畢，不以此文件掩蓋可修 bug。
+以下僅列**無法在代理人環境完整自動化**或**刻意產品架構取捨**；可修核心缺陷（Round 1 至 Round 8 已修各項邊界，以及 Round 9 修復之：onActionClicked 首個 await 紀元檢查防止 Reset 後舊 action 重建 pendingConfirm、createBackup 與 restoreBackup 完整歷史快照與 salvage 記錄深比較防 dropped 資料、R804 停點確實到達之合法序列化控制、OneTab 第一手使用來源追溯、12 秒 Durable Undo 有效期與實體保留精確說明、R907 搜尋及群組篩選命中為 0 與真庫為 0 狀態區分等）已在工程師自測範圍完整修正並通過自測回歸，尚待監工獨立驗收，不以此文件掩蓋可修 bug。
 
-1. **Chrome 工作管理員節省前後 MB**：在 Round 9 監工以原生 Chrome Task Manager 實測觀察到（`native-memory-valid-summary.json`）：合成 64MiB 來源分頁（PID 77535）儲存前佔用 96.5MB 工作程序、儲存關閉後該分頁程序確實完全釋放消失；擴充功能主進程 Library（PID 77538）由 39.6MB 調整為 46.2MB，CPU 顯示 0.0%（Round 9 僅有 Library 項目，未確立 Worker 共用 PID；此反映特定受測來源分頁關閉之程序釋放，非全瀏覽器所有網站精確等額總 RAM 節省或長期 OS CPU 歸零保證）。歷史 Round 8 亦曾記錄 PID 71148（95.2MB 釋放）與 PID 71104（43.9→46.4MB）。自動化測試在未手動觸發原生 Action Click 前無法直接分離工作管理員程序差值；UI「Est. ~N MB」仍為 `50MB × totalClosed` 靜態估計，手動實測操作步驟詳見 `docs/HANDS_ON_ONLY.md`。
+1. **Chrome 工作管理員節省前後 MB**：在 Round 9 監工以原生 Chrome Task Manager 實測觀察到（`native-memory-valid-summary.json`）：合成 64MiB 來源分頁（PID 77535）儲存前佔用 96.5MB 工作程序、儲存關閉後該分頁程序確實完全釋放消失；擴充功能主進程 Library（PID 77538）由 39.6MB 調整為 46.2MB，CPU 顯示 0.0%（Round 9 僅有 Library 項目，未確立 Worker 共用 PID；此反映特定受測來源分頁關閉之程序釋放，非全瀏覽器所有網站精確等額總 RAM 節省或長期 OS CPU 歸零保證）。歷史 Round 8 亦曾記錄 PID 71148（95.2MB 釋放）與 PID 71104（43.9→46.4MB）。UI「Est. ~N MB」仍為 `50MB × totalClosed` 靜態估計，手動實測操作步驟詳見 `docs/HANDS_ON_ONLY.md`。
 2. **系統 Chrome + Playwright `channel:'chromium'`**：E2E 採用官方無頭 Chromium，背景安靜執行。日常使用以使用者安裝的 Chrome（≥127）載入 `dist/` 為準。
 3. **路徑空白與打包**：專案目錄名含空白時，E2E 自動複製到 `/tmp` 無空白路徑避免 Chrome launch 參數中斷；正式打包腳本 `npm run pack` 則直接由 repo 根目錄產出 `tabfold-extension.zip` 並保證與 `dist/` 逐檔一致。
 4. **`chrome.action.openPopup()`**：Chrome ≥127 支援程式化呼叫；在無頭或非聚焦之自動化測試環境下，呼叫可能受限或未觸發原生彈窗視窗，但擴充功能在任何環境下均具備徽章（badge）與 session 結果更新做為可靠狀態反饋，不阻斷儲存流程。

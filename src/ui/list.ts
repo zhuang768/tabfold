@@ -224,7 +224,9 @@ function renderList(entries: SavedTab[]): void {
   if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = STRINGS.emptyTitle;
+    const totalCount = database?.entries.length ?? 0;
+    empty.textContent =
+      totalCount > 0 ? STRINGS.noMatchingTabs : STRINGS.emptyTitle;
     list.append(empty);
     return;
   }
