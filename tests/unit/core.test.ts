@@ -53,7 +53,9 @@ import {
   undoLastSave,
   restoreEntries,
   handleRequest,
+  onActionClicked,
 } from "../../src/browser/library.js";
+import { STRINGS } from "../../src/strings.js";
 
 function entry(
   arg: string | (Partial<SavedTab> & { url: string }),
@@ -182,6 +184,8 @@ function mock(
       setBadgeText: vi.fn(async () => {}),
       setBadgeBackgroundColor: vi.fn(async () => {}),
       setIcon: vi.fn(async () => {}),
+      setPopup: vi.fn(async () => {}),
+      openPopup: vi.fn(async () => {}),
     },
   });
   return {
@@ -1870,7 +1874,11 @@ describe("Round 5 formal regressions (R501–R510)", () => {
     });
 
     it("R603: root schemaVersion mismatch (1.5) on write read-back triggers CorruptDataError and retains source tab", async () => {
-      const base = memoryDriver({ tabfold_database: createEmptyDatabase() });
+      const initialDb = createEmptyDatabase();
+      initialDb.settings.onboardingComplete = true;
+      initialDb.settings.unsavedHintAcknowledged = true;
+      let databaseSets = 0;
+      const base = memoryDriver({ tabfold_database: initialDb });
       const driver = {
         ...base,
         set: async (items: Record<string, unknown>) => {
@@ -1879,6 +1887,7 @@ describe("Round 5 formal regressions (R501–R510)", () => {
             copy.tabfold_database &&
             typeof copy.tabfold_database === "object"
           ) {
+            databaseSets++;
             (copy.tabfold_database as Record<string, unknown>).schemaVersion =
               1.5;
           }
@@ -1909,7 +1918,10 @@ describe("Round 5 formal regressions (R501–R510)", () => {
       ]);
       setStoreForTests(new LibraryStore(driver));
       const saved = await saveTabs({ scope: "current", tabId: 1 });
+      expect(databaseSets).toBeGreaterThan(0);
       expect(saved.closed).toBe(0);
+      expect(saved.saved).toBe(0);
+      expect(saved.failed.length).toBeGreaterThan(0);
       expect(b.tabs().some((t) => t.id === 1)).toBe(true);
       setStoreForTests(null);
     });
@@ -1931,6 +1943,198 @@ describe("Round 5 formal regressions (R501–R510)", () => {
       ]);
       expect(stored.tabfold_op_journal).toBeUndefined();
       expect(stored.tabfold_durable_undo).toBeUndefined();
+      setStoreForTests(null);
+    });
+
+    it("R701: createBackup and restoreBackup enforce verified read-back before destructive mutation", async () => {
+      const initialDb = createEmptyDatabase();
+      const base = memoryDriver({ tabfold_database: initialDb });
+      let dropBackupSets = true;
+      const driver = {
+        ...base,
+        set: async (items: Record<string, unknown>) => {
+          if (items.tabfold_backups && dropBackupSets) {
+            return; // drop backup write
+          }
+          return base.set(items);
+        },
+      };
+      const store = new LibraryStore(driver);
+      await expect(store.createBackup("test-fail", initialDb)).rejects.toThrow(
+        STRINGS.backupReadbackFailed,
+      );
+
+      dropBackupSets = false;
+      await store.createBackup("test-ok", initialDb);
+      const backups = await store.listBackupMeta();
+      expect(backups.length).toBe(1);
+    });
+
+    it("R702: undoLastSave restores latest unexpired Save B rather than older DB undo A", async () => {
+      const initialDb = createEmptyDatabase();
+      const entryA: SavedTab = {
+        schemaVersion: 2,
+        id: "tab-a",
+        url: "https://tab-a.test/",
+        title: "Tab A",
+        favicon: null,
+        savedAt: Date.now() - 5000,
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const entryB: SavedTab = {
+        schemaVersion: 2,
+        id: "tab-b",
+        url: "https://tab-b.test/",
+        title: "Tab B",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      initialDb.entries = [entryB, entryA];
+      initialDb.undo = { ids: [entryA.id], expiresAt: Date.now() + 5000 };
+
+      const base = memoryDriver({
+        tabfold_database: initialDb,
+        tabfold_durable_undo: {
+          ids: [entryB.id],
+          expiresAt: Date.now() + 10000,
+        },
+      });
+      const b = mock();
+      setStoreForTests(new LibraryStore(base));
+      const undoRes = await undoLastSave();
+      expect(undoRes.ok).toBe(true);
+      expect(b.created.some((t) => t.url === entryB.url)).toBe(true);
+      expect(b.created.some((t) => t.url === entryA.url)).toBe(false);
+      setStoreForTests(null);
+    });
+
+    it("R703: reconstructPendingSaveUndo recovers unexpired Undo when worker stopped mid-effect", async () => {
+      const initialDb = createEmptyDatabase();
+      const savedEntry: SavedTab = {
+        schemaVersion: 2,
+        id: "tab-mid",
+        url: "https://mid-effect.test/",
+        title: "Mid Effect",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      initialDb.entries = [savedEntry];
+      const base = memoryDriver({
+        tabfold_database: initialDb,
+        tabfold_op_intent: {
+          opId: "save",
+          tabIds: [10],
+          entryIds: [savedEntry.id],
+          urls: [savedEntry.url],
+          timestamp: Date.now(),
+          expiresAt: Date.now() + 10000,
+        },
+      });
+      // Tab 10 is NOT in mock tabs, simulating it was closed
+      const b = mock();
+      setStoreForTests(new LibraryStore(base));
+      const undoRes = await undoLastSave();
+      expect(undoRes.ok).toBe(true);
+      expect(b.created.some((t) => t.url === savedEntry.url)).toBe(true);
+      setStoreForTests(null);
+    });
+
+    it("R704: ordinary restoreEntries opens a new tab and does not adopt unrelated tab without intent", async () => {
+      const e: SavedTab = {
+        schemaVersion: 2,
+        id: "tab-ord",
+        url: "https://ordinary-same-url.test/",
+        title: "Ordinary Same URL",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const initialDb = createEmptyDatabase();
+      initialDb.entries = [e];
+      initialDb.settings.removeAfterRestore = false;
+      const base = memoryDriver({ tabfold_database: initialDb });
+      // Existing open tab in window 5 with identical URL
+      const b = mock([
+        {
+          id: 88,
+          url: e.url,
+          title: "Existing Tab",
+          windowId: 5,
+          index: 0,
+          pinned: false,
+          active: false,
+          audible: false,
+        },
+      ]);
+      setStoreForTests(new LibraryStore(base));
+      const restored = await restoreEntries([e.id]);
+      expect(restored.opened).toBe(1);
+      expect(b.created.length).toBe(1);
+      expect(b.tabs().some((t) => t.id === 88)).toBe(true);
+      setStoreForTests(null);
+    });
+
+    it("R705: onActionClicked does not persist to session or open popup if reset-all occurred in flight", async () => {
+      const initialDb = createEmptyDatabase();
+      initialDb.settings.onboardingComplete = true;
+      initialDb.settings.unsavedHintAcknowledged = true;
+      const base = memoryDriver({ tabfold_database: initialDb });
+      const b = mock([
+        {
+          id: 1,
+          url: "https://reset-race.test/",
+          title: "Reset Race",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+          audible: false,
+        },
+      ]);
+      expect(b.tabs().length).toBe(1);
+      setStoreForTests(new LibraryStore(base));
+      let popupOpened = false;
+      chrome.action.openPopup = async () => {
+        popupOpened = true;
+      };
+
+      // Trigger onActionClicked and trigger reset-all during saveTabs
+      const saveActionPromise = onActionClicked({
+        id: 1,
+        url: "https://reset-race.test/",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+        highlighted: true,
+        incognito: false,
+        selected: true,
+        discarded: false,
+        autoDiscardable: true,
+        groupId: -1,
+      } as unknown as chrome.tabs.Tab);
+
+      await handleRequest({ type: "reset-all" });
+      await saveActionPromise;
+
+      const sess = await chrome.storage.session.get("all");
+      expect(sess.lastSaveResult).toBeUndefined();
+      expect(sess.lastSaveAt).toBeUndefined();
+      expect(popupOpened).toBe(false);
       setStoreForTests(null);
     });
   });

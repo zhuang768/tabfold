@@ -357,13 +357,18 @@ function getJournalTabId(
 
 interface OperationIntent {
   opId: string;
-  entryId: string;
-  url: string;
+  entryId?: string;
+  url?: string;
   windowId?: number;
   timestamp: number;
+  tabIds?: number[];
+  entryIds?: string[];
+  urls?: string[];
+  expiresAt?: number;
 }
 
 let inMemoryIntent: OperationIntent | null = null;
+let resetEpoch = 0;
 
 async function recordIntent(intent: OperationIntent): Promise<void> {
   inMemoryIntent = intent;
@@ -379,8 +384,10 @@ async function recordIntent(intent: OperationIntent): Promise<void> {
       OperationIntent | undefined;
     if (
       readBack &&
-      readBack.url === intent.url &&
-      readBack.entryId === intent.entryId
+      (intent.opId === "save"
+        ? Array.isArray(readBack.entryIds) &&
+          readBack.entryIds.length === (intent.entryIds?.length ?? 0)
+        : readBack.url === intent.url && readBack.entryId === intent.entryId)
     ) {
       driverSaved = true;
     }
@@ -445,6 +452,72 @@ export async function getPendingIntent(): Promise<OperationIntent | null> {
   return null;
 }
 
+async function reconstructPendingSaveUndo(
+  db: Database,
+): Promise<UndoState | null> {
+  const intent = await getPendingIntent();
+  if (
+    !intent ||
+    intent.opId !== "save" ||
+    !Array.isArray(intent.tabIds) ||
+    !Array.isArray(intent.entryIds) ||
+    !intent.entryIds.length
+  ) {
+    return null;
+  }
+  if (typeof intent.expiresAt === "number" && intent.expiresAt <= Date.now()) {
+    await clearIntent().catch(() => undefined);
+    return null;
+  }
+
+  const actuallyClosedEntryIds: string[] = [];
+  if (typeof chrome !== "undefined" && chrome.tabs?.get) {
+    for (let i = 0; i < intent.tabIds.length; i++) {
+      const tabId = intent.tabIds[i];
+      const entryId = intent.entryIds[i];
+      if (tabId != null && entryId != null) {
+        try {
+          await chrome.tabs.get(tabId);
+        } catch {
+          actuallyClosedEntryIds.push(entryId);
+        }
+      }
+    }
+  } else {
+    actuallyClosedEntryIds.push(...intent.entryIds);
+  }
+
+  const existingIds = new Set(db.entries.map((e) => e.id));
+  const validEntryIds = actuallyClosedEntryIds.filter((id) =>
+    existingIds.has(id),
+  );
+  if (!validEntryIds.length) {
+    return null;
+  }
+
+  const expiresAt =
+    typeof intent.expiresAt === "number" && intent.expiresAt > Date.now()
+      ? intent.expiresAt
+      : (intent.timestamp ?? Date.now()) + UNDO_TTL_MS;
+
+  const reconstructed: UndoState = {
+    ids: validEntryIds,
+    expiresAt,
+  };
+
+  try {
+    const s = getStore();
+    await s.getDriver().set({ [DURABLE_UNDO_KEY]: reconstructed });
+    if (typeof chrome !== "undefined" && chrome.storage?.session) {
+      await chrome.storage.session.set({ [DURABLE_UNDO_KEY]: reconstructed });
+    }
+  } catch {
+    // best effort
+  }
+
+  return reconstructed;
+}
+
 async function verifyTabAlive(
   tabId: number,
   expectedUrl?: string,
@@ -488,7 +561,7 @@ export async function saveTabs(options: {
     }
 
     if (!isValidScope(options.scope) && !bound && !options.tabIds?.length) {
-      return emptySave({ message: "Invalid save scope." });
+      return emptySave({ message: STRINGS.invalidScope });
     }
 
     let selected: chrome.tabs.Tab[] = [];
@@ -952,6 +1025,35 @@ export async function saveTabs(options: {
 
       const actuallyClosed: number[] = [];
       const actuallyOpen: number[] = [];
+
+      const targetEntryIds = toClose
+        .map((id) => entryByTabId.get(id)?.id)
+        .filter((x): x is string => Boolean(x));
+      const targetUrls = toClose
+        .map((id) => entryByTabId.get(id)?.url)
+        .filter((x): x is string => Boolean(x));
+      const saveTimestamp = Date.now();
+      try {
+        await recordIntent({
+          opId: "save",
+          tabIds: toClose,
+          entryIds: targetEntryIds,
+          urls: targetUrls,
+          timestamp: saveTimestamp,
+          expiresAt: saveTimestamp + UNDO_TTL_MS,
+        });
+      } catch {
+        return emptySave({
+          message: `${STRINGS.writeFailed} (${STRINGS.auxStorageUnavailable})`,
+          skipped,
+          failed: candidates.map((t) => ({
+            title: t.title || "",
+            url: t.url || "",
+            reason: STRINGS.writeFailed,
+          })),
+        });
+      }
+
       try {
         await chrome.tabs.remove(toClose);
         actuallyClosed.push(...toClose);
@@ -1019,6 +1121,7 @@ export async function saveTabs(options: {
           // ignore
         }
       }
+      await clearIntent().catch(() => undefined);
 
       if (actuallyOpen.length) {
         await clearConfirm();
@@ -1040,7 +1143,7 @@ export async function saveTabs(options: {
           ],
           needsConfirmation: [],
           undoIds: actuallyClosedEntryIds,
-          message: `${STRINGS.closeFailed} Data was saved; tabs may still be open.${statsWarning ? " (Warning: stats could not be updated)" : ""}`,
+          message: `${STRINGS.closeFailed}${STRINGS.savedTabsSomeNotClosed}${statsWarning ? STRINGS.statsUpdateWarning : ""}`,
         };
       }
     }
@@ -1059,7 +1162,7 @@ export async function saveTabs(options: {
             : STRINGS.savedN(saved)
           : STRINGS.savedPartial(saved, totalAttempt);
     if (statsWarning) {
-      message += " (Warning: stats could not be updated)";
+      message += STRINGS.statsUpdateWarning;
     }
 
     return {
@@ -1167,7 +1270,17 @@ export async function restoreEntries(
       }
 
       let adoptedTab: chrome.tabs.Tab | null = null;
-      if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+      const activeIntent = await getPendingIntent();
+      const hasIntentForEntry =
+        activeIntent &&
+        activeIntent.opId === "restore" &&
+        activeIntent.entryId === entry.id;
+
+      if (
+        hasIntentForEntry &&
+        typeof chrome !== "undefined" &&
+        chrome.tabs?.query
+      ) {
         try {
           const res = chrome.tabs.query({});
           const openTabs: chrome.tabs.Tab[] = (
@@ -1265,7 +1378,7 @@ export async function restoreEntries(
       }
     } catch (e) {
       await refreshBadgeFromDb();
-      const reason = e instanceof Error ? e.message : "persist failed";
+      const reason = e instanceof Error ? e.message : STRINGS.persistFailed;
       return {
         opened,
         failed,
@@ -1290,47 +1403,84 @@ export async function undoLastSave(): Promise<{
   const s = getStore();
   return s.exclusive(async () => {
     const db = await s.readDatabaseUnlocked();
-    let undoState = db.undo;
-    if (!undoState || Date.now() > undoState.expiresAt) {
+    const now = Date.now();
+    let dbCandidate: UndoState | null = null;
+    if (
+      db.undo &&
+      db.undo.expiresAt > now &&
+      Array.isArray(db.undo.ids) &&
+      db.undo.ids.length > 0
+    ) {
+      dbCandidate = db.undo;
+    }
+
+    let durableCandidate: UndoState | null = null;
+    try {
+      const durable = (await s.getDriver().get([DURABLE_UNDO_KEY]))[
+        DURABLE_UNDO_KEY
+      ] as UndoState | undefined;
+      if (
+        durable &&
+        typeof durable === "object" &&
+        Array.isArray(durable.ids) &&
+        typeof durable.expiresAt === "number" &&
+        durable.expiresAt > now
+      ) {
+        durableCandidate = durable;
+      }
+    } catch {
+      // best effort
+    }
+    if (!durableCandidate) {
       try {
-        const durable = (await s.getDriver().get([DURABLE_UNDO_KEY]))[
-          DURABLE_UNDO_KEY
-        ] as UndoState | undefined;
-        if (
-          durable &&
-          typeof durable === "object" &&
-          Array.isArray(durable.ids) &&
-          durable.expiresAt > Date.now()
-        ) {
-          undoState = durable;
+        if (typeof chrome !== "undefined" && chrome.storage?.session) {
+          const sess = await chrome.storage.session.get(DURABLE_UNDO_KEY);
+          const durable = sess[DURABLE_UNDO_KEY] as UndoState | undefined;
+          if (
+            durable &&
+            typeof durable === "object" &&
+            Array.isArray(durable.ids) &&
+            typeof durable.expiresAt === "number" &&
+            durable.expiresAt > now
+          ) {
+            durableCandidate = durable;
+          }
         }
       } catch {
         // best effort
       }
-      if (!undoState || Date.now() > undoState.expiresAt) {
-        try {
-          if (typeof chrome !== "undefined" && chrome.storage?.session) {
-            const sess = await chrome.storage.session.get(DURABLE_UNDO_KEY);
-            const durable = sess[DURABLE_UNDO_KEY] as UndoState | undefined;
-            if (
-              durable &&
-              typeof durable === "object" &&
-              Array.isArray(durable.ids) &&
-              durable.expiresAt > Date.now()
-            ) {
-              undoState = durable;
-            }
-          }
-        } catch {
-          // best effort
-        }
+    }
+
+    if (!dbCandidate && !durableCandidate) {
+      const pendingUndo = await reconstructPendingSaveUndo(db);
+      if (pendingUndo) {
+        durableCandidate = pendingUndo;
       }
     }
-    if (!undoState || Date.now() > undoState.expiresAt) {
+
+    let chosenUndo: UndoState | null = null;
+    let chosenSource: "db" | "durable" | null = null;
+    if (dbCandidate && durableCandidate) {
+      if (durableCandidate.expiresAt >= dbCandidate.expiresAt) {
+        chosenUndo = durableCandidate;
+        chosenSource = "durable";
+      } else {
+        chosenUndo = dbCandidate;
+        chosenSource = "db";
+      }
+    } else if (durableCandidate) {
+      chosenUndo = durableCandidate;
+      chosenSource = "durable";
+    } else if (dbCandidate) {
+      chosenUndo = dbCandidate;
+      chosenSource = "db";
+    }
+
+    if (!chosenUndo || Date.now() > chosenUndo.expiresAt) {
       return { ok: false, message: STRINGS.undoExpired };
     }
-    const ids = [...undoState.ids];
-    const expiresAt = undoState.expiresAt;
+    const ids = [...chosenUndo.ids];
+    const expiresAt = chosenUndo.expiresAt;
     const entries = db.entries.filter((e) => ids.includes(e.id));
     const openedIds: string[] = [];
     const failedIds: string[] = [];
@@ -1360,7 +1510,17 @@ export async function undoLastSave(): Promise<{
       }
 
       let adoptedTab: chrome.tabs.Tab | null = null;
-      if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+      const activeIntent = await getPendingIntent();
+      const hasIntentForEntry =
+        activeIntent &&
+        activeIntent.opId === "undo" &&
+        activeIntent.entryId === entry.id;
+
+      if (
+        hasIntentForEntry &&
+        typeof chrome !== "undefined" &&
+        chrome.tabs?.query
+      ) {
         try {
           const res = chrome.tabs.query({});
           const openTabs: chrome.tabs.Tab[] = (
@@ -1415,26 +1575,40 @@ export async function undoLastSave(): Promise<{
       }
     }
     const cur = await s.readDatabaseUnlocked();
+    const nextUndoInDb =
+      chosenSource === "db"
+        ? failedIds.length && Date.now() < expiresAt
+          ? { ids: failedIds, expiresAt }
+          : null
+        : cur.undo &&
+            cur.undo.expiresAt > Date.now() &&
+            cur.undo.expiresAt > expiresAt
+          ? cur.undo
+          : null;
+
     await s.writeDatabaseUnlocked(
       {
         ...cur,
         entries: cur.entries.filter((e) => !openedIds.includes(e.id)),
-        undo:
-          failedIds.length && Date.now() < expiresAt
-            ? { ids: failedIds, expiresAt }
-            : null,
+        undo: nextUndoInDb,
       },
       cur.revision,
     );
     await clearJournal(UNDO_JOURNAL_KEY);
     await clearJournal(RESTORE_JOURNAL_KEY);
-    try {
-      await s.getDriver().remove([DURABLE_UNDO_KEY]);
-      if (typeof chrome !== "undefined" && chrome.storage?.session) {
-        await chrome.storage.session.remove([DURABLE_UNDO_KEY]);
+    if (
+      chosenSource === "durable" ||
+      !durableCandidate ||
+      durableCandidate.expiresAt <= expiresAt
+    ) {
+      try {
+        await s.getDriver().remove([DURABLE_UNDO_KEY]);
+        if (typeof chrome !== "undefined" && chrome.storage?.session) {
+          await chrome.storage.session.remove([DURABLE_UNDO_KEY]);
+        }
+      } catch {
+        // best effort
       }
-    } catch {
-      // best effort
     }
     await clearJournal(UNDO_JOURNAL_KEY);
     await refreshBadgeFromDb();
@@ -1463,6 +1637,7 @@ export async function handleRequest(req: Request): Promise<Response> {
         try {
           const database = await s.readDatabase();
           const backups = await s.listBackupMeta();
+          await reconstructPendingSaveUndo(database);
           return {
             ok: true,
             data: { database, backups, corrupt: false as const },
@@ -1496,30 +1671,30 @@ export async function handleRequest(req: Request): Promise<Response> {
               (t) => typeof t !== "number" || !Number.isInteger(t),
             ))
         ) {
-          return { ok: false, error: "Invalid tabIds array." };
+          return { ok: false, error: STRINGS.invalidTabIds };
         }
         if (
           req.confirmedAudio !== undefined &&
           typeof req.confirmedAudio !== "boolean"
         ) {
-          return { ok: false, error: "confirmedAudio must be a boolean." };
+          return { ok: false, error: STRINGS.confirmedAudioBoolean };
         }
         if (
           req.confirmedUnsaved !== undefined &&
           typeof req.confirmedUnsaved !== "boolean"
         ) {
-          return { ok: false, error: "confirmedUnsaved must be a boolean." };
+          return { ok: false, error: STRINGS.confirmedUnsavedBoolean };
         }
         if (
           req.confirmToken !== undefined &&
           typeof req.confirmToken !== "string"
         ) {
-          return { ok: false, error: "confirmToken must be a string." };
+          return { ok: false, error: STRINGS.confirmTokenString };
         }
         let scope: SaveScope = "current";
         if (req.scope !== undefined) {
           if (!isValidScope(req.scope)) {
-            return { ok: false, error: "Invalid save scope." };
+            return { ok: false, error: STRINGS.invalidScope };
           }
           scope = req.scope;
         } else if (req.confirmToken) {
@@ -1609,6 +1784,7 @@ export async function handleRequest(req: Request): Promise<Response> {
         return { ok: true, data: { cleared: true } };
       }
       case "reset-all": {
+        resetEpoch++;
         try {
           const cur = await s.readDatabase();
           await s.createBackup("before-reset", cur);
@@ -1925,19 +2101,29 @@ export async function handleRequest(req: Request): Promise<Response> {
 }
 
 export async function onActionClicked(tab: chrome.tabs.Tab): Promise<void> {
+  const currentEpoch = resetEpoch;
   // Ensure next click stays on onClicked (no sticky popup)
   await chrome.action.setPopup({ popup: "" });
 
   const saveOpts: Parameters<typeof saveTabs>[0] = { scope: "current" };
   if (tab.id != null) saveOpts.tabId = tab.id;
   const result = await saveTabs(saveOpts);
+  if (currentEpoch !== resetEpoch) return;
+
   await chrome.storage.session.set({
     lastSaveResult: result,
     lastSaveAt: Date.now(),
   });
+  if (currentEpoch !== resetEpoch) {
+    await chrome.storage.session
+      .remove(["lastSaveResult", "lastSaveAt"])
+      .catch(() => undefined);
+    return;
+  }
 
   try {
     await chrome.action.setPopup({ popup: "popup.html" });
+    if (currentEpoch !== resetEpoch) return;
     await chrome.action.openPopup();
   } catch {
     await chrome.action.setPopup({ popup: "" });
@@ -2017,18 +2203,28 @@ export function registerServiceWorkerListeners(): void {
   async function handleContextMenuSave(
     opts: Parameters<typeof saveTabs>[0],
   ): Promise<void> {
+    const currentEpoch = resetEpoch;
     const result = await saveTabs(opts);
+    if (currentEpoch !== resetEpoch) return;
     try {
       await chrome.storage.session.set({
         lastSaveResult: result,
         lastSaveAt: Date.now(),
       });
+      if (currentEpoch !== resetEpoch) {
+        await chrome.storage.session
+          .remove(["lastSaveResult", "lastSaveAt"])
+          .catch(() => undefined);
+        return;
+      }
     } catch {
       // session storage fallback
     }
+    if (currentEpoch !== resetEpoch) return;
     if (result.needsConfirmation.length || result.needsUnsavedAck) {
       try {
         await chrome.action.setPopup({ popup: "popup.html" });
+        if (currentEpoch !== resetEpoch) return;
         await chrome.action.openPopup();
       } catch {
         await chrome.action.setPopup({ popup: "" });

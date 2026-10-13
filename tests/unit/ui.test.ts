@@ -71,6 +71,10 @@ class El {
         : [],
     );
   }
+  getAttribute(k: string) {
+    const val = (this as unknown as Record<string, unknown>)[k];
+    return val !== undefined ? String(val) : null;
+  }
   setAttribute(k: string, v: unknown) {
     (this as unknown as Record<string, unknown>)[k] = v;
   }
@@ -126,7 +130,8 @@ async function setup(
   file: string,
   extras: string,
   handler: (req: { type: string; [k: string]: unknown }) => Promise<unknown>,
-  session: Record<string, unknown> = {},
+  session:
+    Record<string, unknown> | (() => Promise<Record<string, unknown>>) = {},
   local: Record<string, unknown> = {},
 ) {
   const els = new Map<string, El>();
@@ -178,8 +183,15 @@ async function setup(
     },
     storage: {
       session: {
-        get: async () => session,
-        set: async (x: Record<string, unknown>) => Object.assign(session, x),
+        get: async () =>
+          typeof session === "function"
+            ? await (session as () => Promise<Record<string, unknown>>)()
+            : session,
+        set: async (x: Record<string, unknown>) => {
+          if (typeof session === "object" && session !== null) {
+            Object.assign(session, x);
+          }
+        },
         remove: async () => {},
       },
       local: {
@@ -580,5 +592,112 @@ describe("UI State, Timing & Isolation Regressions (R409–R414)", () => {
     resolveState(null);
     await pendingLoad;
     expect(ui.get("status").hidden).toBe(true);
+  });
+
+  it("popup: out-of-order resolveEffectiveUndo does not overwrite newer state (R706)", async () => {
+    let mode = "initial";
+    let resolveSlowSession!: (val: unknown) => void;
+    let startedResolve!: () => void;
+    const started = new Promise<void>((r) => {
+      startedResolve = r;
+    });
+    const slowSessionPromise = new Promise((r) => {
+      resolveSlowSession = r;
+    });
+
+    const ui = await setup(
+      "src/ui/popup.ts",
+      "load,getDatabase:()=>database",
+      async (req) => {
+        if (req.type === "get-state") {
+          if (mode === "slow") {
+            return { ok: true, data: { database: mkDb() } };
+          }
+          if (mode === "fail") {
+            return { ok: false, error: "Newer failure" };
+          }
+          return { ok: true, data: { database: mkDb() } };
+        }
+        return { ok: true, data: {} };
+      },
+      async () => {
+        if (mode === "slow") {
+          startedResolve();
+          return (await slowSessionPromise) as Record<string, unknown>;
+        }
+        return {};
+      },
+    );
+
+    await ui.a.load();
+    mode = "slow";
+    const pendingSlow = ui.a.load();
+    await started;
+
+    mode = "fail";
+    await ui.a.load();
+    expect(ui.a.getDatabase()).toBeNull();
+
+    resolveSlowSession({
+      tabfold_durable_undo: { ids: ["e1"], expiresAt: 1700000012000 },
+    });
+    await pendingSlow;
+    expect(ui.a.getDatabase()).toBeNull();
+  });
+
+  for (const surface of ["popup", "list"]) {
+    it(`${surface}: unrelated status message does not destroy durable undo button (R707)`, async () => {
+      const durable = {
+        ids: ["e1"],
+        expiresAt: 1700000012000,
+      };
+      const ui = await setup(
+        "src/ui/" + surface + ".ts",
+        "load,showStatus,getDatabase:()=>database",
+        async (req) => {
+          if (req.type === "get-state") {
+            return { ok: true, data: { database: mkDb(null), backups: [] } };
+          }
+          if (req.type === "list-window-tabs") {
+            return { ok: true, data: { tabs: [] } };
+          }
+          return { ok: true, data: {} };
+        },
+        { tabfold_durable_undo: durable },
+        { tabfold_durable_undo: durable },
+      );
+      await ui.a.load();
+      expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+
+      await ui.a.showStatus("Unrelated background message", "warn");
+      expect(ui.get("status").children[0]?.textContent).toContain(
+        "Unrelated background message",
+      );
+      expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+    });
+  }
+
+  it("options: load removes aria-busy even when custom status warning is shown (R708)", async () => {
+    let warnEmitted = false;
+    let uiRef: {
+      a: { showStatus: (msg: string, kind?: string) => Promise<void> };
+    } | null = null;
+    const ui = await setup(
+      "src/ui/options.ts",
+      "load,showStatus",
+      async (req) => {
+        if (req.type === "get-state") {
+          if (!warnEmitted && uiRef) {
+            warnEmitted = true;
+            await uiRef.a.showStatus("Warning during load", "warn");
+          }
+          return { ok: true, data: { database: mkDb(), backups: [] } };
+        }
+        return { ok: true, data: {} };
+      },
+    );
+    uiRef = ui;
+    await ui.a.load();
+    expect(ui.get("status").getAttribute("aria-busy")).toBeNull();
   });
 });

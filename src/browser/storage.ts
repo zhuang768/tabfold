@@ -372,10 +372,7 @@ export class LibraryStore {
       typeof (readRaw as Record<string, unknown>).schemaVersion !== "number" ||
       !Number.isInteger((readRaw as Record<string, unknown>).schemaVersion)
     ) {
-      throw new CorruptDataError(
-        "Read-back root schemaVersion invalid or missing",
-        readRaw,
-      );
+      throw new CorruptDataError(STRINGS.rootSchemaInvalid, readRaw);
     }
     const readMigrated = migrateDatabase(readRaw, { strictCurrent: true });
     if (!databaseContentMatches(toWrite, readMigrated.database)) {
@@ -392,7 +389,7 @@ export class LibraryStore {
     const data = await this.driver.get([DB_KEY, CORRUPT_KEY, SALVAGE_KEY]);
     if (data[CORRUPT_KEY] != null && data[DB_KEY] == null) {
       throw new CorruptDataError(
-        "Previously detected corruption; raw backup retained.",
+        STRINGS.previouslyDetectedCorruption,
         data[CORRUPT_KEY],
       );
     }
@@ -496,6 +493,15 @@ export class LibraryStore {
     };
     const next = [snap, ...existing].slice(0, MAX_BACKUPS);
     await this.driver.set({ [BACKUPS_KEY]: next });
+
+    const verify = await this.driver.get([BACKUPS_KEY]);
+    const readList = verify[BACKUPS_KEY];
+    if (
+      !Array.isArray(readList) ||
+      !readList.some((s: Snapshot) => s && s.id === snap.id)
+    ) {
+      throw new Error(STRINGS.backupReadbackFailed);
+    }
   }
 
   async createBackup(
@@ -522,9 +528,26 @@ export class LibraryStore {
     // Preserve current raw before restore (even if corrupt) in durable salvage
     const currentRaw = data[DB_KEY] ?? data[CORRUPT_KEY] ?? data[SALVAGE_KEY];
     if (currentRaw != null) {
-      await this.driver.set({
-        [SALVAGE_KEY]: appendSalvage(data[SALVAGE_KEY], currentRaw),
-      });
+      let salvageOk = false;
+      let backupOk = false;
+      const nextSalvage = appendSalvage(data[SALVAGE_KEY], currentRaw);
+      try {
+        await this.driver.set({
+          [SALVAGE_KEY]: nextSalvage,
+        });
+        const verifySalvage = await this.driver.get([SALVAGE_KEY]);
+        const sVal = verifySalvage[SALVAGE_KEY];
+        const rawJson = JSON.stringify(currentRaw);
+        if (
+          Array.isArray(sVal) &&
+          sVal.some((item) => JSON.stringify(item) === rawJson)
+        ) {
+          salvageOk = true;
+        }
+      } catch {
+        // salvage write/verify failed
+      }
+
       try {
         const cur = migrateDatabase(currentRaw).database;
         const snap: Snapshot = {
@@ -535,8 +558,21 @@ export class LibraryStore {
         };
         const next = [snap, ...existing].slice(0, MAX_BACKUPS);
         await this.driver.set({ [BACKUPS_KEY]: next });
+        const verifyBackups = await this.driver.get([BACKUPS_KEY]);
+        if (
+          Array.isArray(verifyBackups[BACKUPS_KEY]) &&
+          verifyBackups[BACKUPS_KEY].some(
+            (s: Snapshot) => s && s.id === snap.id,
+          )
+        ) {
+          backupOk = true;
+        }
       } catch {
-        // if corrupt, already recorded in salvage
+        // if corrupt or write failed
+      }
+
+      if (!salvageOk && !backupOk) {
+        throw new Error(STRINGS.salvageReadbackFailed);
       }
     }
 

@@ -117,13 +117,21 @@ export async function resolveEffectiveUndo(
   } | null,
 ): Promise<EffectiveUndo | null> {
   const now = Date.now();
-  if (db?.undo && db.undo.expiresAt > now && db.undo.ids.length > 0) {
+  let candidateDb: EffectiveUndo | null = null;
+  if (
+    db?.undo &&
+    db.undo.expiresAt > now &&
+    Array.isArray(db.undo.ids) &&
+    db.undo.ids.length > 0
+  ) {
     const existingIds = new Set(db.entries.map((e) => e.id));
     const validIds = db.undo.ids.filter((id) => existingIds.has(id));
     if (validIds.length > 0) {
-      return { ids: validIds, expiresAt: db.undo.expiresAt };
+      candidateDb = { ids: validIds, expiresAt: db.undo.expiresAt };
     }
   }
+
+  let candidateDurable: EffectiveUndo | null = null;
   try {
     if (typeof chrome !== "undefined" && chrome.storage) {
       let durable: { ids?: string[]; expiresAt?: number } | undefined;
@@ -152,12 +160,18 @@ export async function resolveEffectiveUndo(
           ? durable.ids.filter((id) => existingIds.has(id))
           : durable.ids;
         if (validIds.length > 0) {
-          return { ids: validIds, expiresAt: durable.expiresAt };
+          candidateDurable = { ids: validIds, expiresAt: durable.expiresAt };
         }
       }
     }
   } catch {
     // auxiliary storage lookup failed
   }
-  return null;
+
+  if (candidateDb && candidateDurable) {
+    return candidateDurable.expiresAt >= candidateDb.expiresAt
+      ? candidateDurable
+      : candidateDb;
+  }
+  return candidateDurable ?? candidateDb;
 }

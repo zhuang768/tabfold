@@ -23,4 +23,5 @@ No jsdom (unused). No analytics, no CDN scripts, no remote code in `dist/`.
 - Run `npm audit` after `npm ci`.
 - Do **not** use `npm audit fix --force`.
 - Zero vulnerabilities reported with direct standard package lockfile (no overrides required).
-- Environment-only install notices (deprecated transitive packages, script policy) are documented in TEST_REPORT when present; they are not runtime warnings for the extension.
+- Environment-only install notices: some direct devDependencies (such as `@eslint/js` transitive sub-packages or legacy format tools) display deprecation notices during install; these are build/lint environment notices, not runtime vulnerabilities for the extension.
+- Clean reproducible installation requires **Node 20/22+ with npm 11+**; clean git checkouts under npm 10.9.2 fail due to an esbuild binary postinstall resolution bug.

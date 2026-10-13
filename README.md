@@ -4,7 +4,7 @@ Save tabs. Free memory. Open them later.
 
 Tabfold is a **local-only** Chrome Manifest V3 extension. Click the toolbar icon to save the current tab’s URL, title, and favicon, then close the tab. Restore anytime from the popup or full library page.
 
-**Requirements:** Node.js **^20.19.0 || ^22.13.0 || >=24.0.0**, npm (recommended npm >=10.9.2 or npm 11+; clean lock reproducible across Node 20/22 with npm 11.x), and a system with Playwright bundled Chromium installed (`npx playwright install chromium`). Packaging requires system `zip` (macOS/Linux) or PowerShell `Compress-Archive` (Windows). **Minimum Chrome: 127** (for `chrome.action.openPopup`).
+**Requirements:** Node.js **^20.19.0 || ^22.13.0 || >=24.0.0**, **npm 11+** (recommended npm >=11.0.0; clean git checkouts require npm 11+ because clean install with npm 10.9.2 fails with exit code 1 due to an esbuild binary postinstall resolution bug, whereas npm 11.x installs cleanly across both Node 20.19 and Node 22.13), and a system with Playwright bundled Chromium installed (`npx playwright install chromium`). Packaging requires system `zip` (macOS/Linux) or PowerShell `Compress-Archive` (Windows). **Minimum Chrome: 127** (for `chrome.action.openPopup`).
 
 ## Features
 

@@ -235,6 +235,14 @@ export const STRINGS = {
   auxStorageUnavailable: "Auxiliary storage unavailable.",
   journalReadUnavailable: "Journal read unavailable.",
   actionDefaultTitle: "Save current tab with Tabfold",
+  rootSchemaInvalid: "Read-back root schemaVersion invalid or missing",
+  previouslyDetectedCorruption:
+    "Previously detected corruption; raw backup retained.",
+  backupReadbackFailed: "Backup creation read-back verification failed.",
+  salvageReadbackFailed: "Salvage record read-back verification failed.",
+  savedTabsSomeNotClosed: " Data was saved; tabs may still be open.",
+  statsUpdateWarning: " (Warning: stats could not be updated)",
+  persistFailed: "persist failed",
 } as const;
 
 export type StringKey = keyof typeof STRINGS;

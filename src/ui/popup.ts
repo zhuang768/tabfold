@@ -9,6 +9,7 @@ import {
   listenStorageReload,
   renderFavicon,
   resolveEffectiveUndo,
+  type EffectiveUndo,
   send,
   text,
 } from "./shared.js";
@@ -21,6 +22,7 @@ let query = "";
 let undoTimer: number | null = null;
 let reloadTimer: number | null = null;
 let loadGeneration = 0;
+let currentEffectiveUndo: EffectiveUndo | null = null;
 
 function showStatus(
   message: string,
@@ -36,17 +38,27 @@ function showStatus(
   span.textContent = message;
   el.append(span);
 
-  const activeUndoIds =
+  let activeUndoIds: string[] = [];
+  let actualTtl = 0;
+
+  if (
+    currentEffectiveUndo &&
+    currentEffectiveUndo.expiresAt > Date.now() &&
+    currentEffectiveUndo.ids.length > 0
+  ) {
+    activeUndoIds = currentEffectiveUndo.ids;
+    actualTtl = Math.max(0, currentEffectiveUndo.expiresAt - Date.now());
+  } else if (
     database?.undo &&
     database.undo.expiresAt > Date.now() &&
     database.undo.ids.length > 0
-      ? database.undo.ids
-      : undoIds;
-
-  const actualTtl =
-    database?.undo && database.undo.expiresAt > Date.now()
-      ? Math.max(0, database.undo.expiresAt - Date.now())
-      : ttlMs;
+  ) {
+    activeUndoIds = database.undo.ids;
+    actualTtl = Math.max(0, database.undo.expiresAt - Date.now());
+  } else if (undoIds.length > 0 && ttlMs > 0) {
+    activeUndoIds = undoIds;
+    actualTtl = ttlMs;
+  }
 
   if (activeUndoIds.length && actualTtl > 0) {
     const btn = document.createElement("button");
@@ -59,6 +71,7 @@ function showStatus(
     undoTimer = window.setTimeout(() => {
       btn.remove();
       undoTimer = null;
+      currentEffectiveUndo = null;
     }, actualTtl);
   } else {
     if (undoTimer) {
@@ -69,6 +82,7 @@ function showStatus(
 }
 
 async function doUndo(): Promise<void> {
+  currentEffectiveUndo = null;
   const res = await send<{ message: string }>({ type: "undo" });
   if (res.ok) showStatus(res.data.message, "ok");
   else showStatus(res.error, "warn");
@@ -352,6 +366,8 @@ async function load(): Promise<void> {
   );
 
   const effectiveUndo = await resolveEffectiveUndo(database);
+  if (gen !== loadGeneration || !database) return;
+  currentEffectiveUndo = effectiveUndo;
   const statusEl = $("status");
   const existingBtn =
     statusEl.querySelector?.("#btn-undo") ??
@@ -362,6 +378,7 @@ async function load(): Promise<void> {
     effectiveUndo.expiresAt <= Date.now() ||
     !effectiveUndo.ids.length
   ) {
+    currentEffectiveUndo = null;
     if (existingBtn) existingBtn.remove();
     if (undoTimer) {
       window.clearTimeout(undoTimer);

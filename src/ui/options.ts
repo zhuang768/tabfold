@@ -48,9 +48,9 @@ async function load(): Promise<void> {
 
   if (gen !== loadGeneration) return;
 
+  statusEl.removeAttribute("aria-busy");
   if (statusEl.textContent === STRINGS.loading) {
     statusEl.hidden = true;
-    statusEl.removeAttribute("aria-busy");
     statusEl.textContent = "";
   }
 
