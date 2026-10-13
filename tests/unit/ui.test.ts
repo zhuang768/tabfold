@@ -700,4 +700,57 @@ describe("UI State, Timing & Isolation Regressions (R409–R414)", () => {
     await ui.a.load();
     expect(ui.get("status").getAttribute("aria-busy")).toBeNull();
   });
+
+  for (const surface of ["popup", "list"]) {
+    it(`${surface}: failed Undo preserves retry entry and visible error within TTL (R805)`, async () => {
+      const durable = {
+        ids: ["e1"],
+        expiresAt: 1700000012000,
+      };
+      let undoShouldFail = true;
+      const ui = await setup(
+        "src/ui/" + surface + ".ts",
+        "load,doUndo,showStatus,getDatabase:()=>database",
+        async (req) => {
+          if (req.type === "get-state") {
+            return {
+              ok: true,
+              data: {
+                database: mkDb(null),
+                backups: [],
+              },
+            };
+          }
+          if (req.type === "list-window-tabs") {
+            return { ok: true, data: { tabs: [] } };
+          }
+          if (req.type === "undo") {
+            if (undoShouldFail) {
+              return { ok: false, error: "Injected Undo transport failure" };
+            }
+            return { ok: true, data: { message: "Restored 1 tab." } };
+          }
+          return { ok: true, data: {} };
+        },
+        { tabfold_durable_undo: durable },
+        { tabfold_durable_undo: durable },
+      );
+      await ui.a.load();
+      expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+
+      await ui.a.doUndo?.();
+
+      expect(ui.get("status").children[0]?.textContent).toContain(
+        "Injected Undo transport failure",
+      );
+      expect(ui.get("status").querySelectorAll("button").length).toBe(1);
+
+      undoShouldFail = false;
+      await ui.a.doUndo?.();
+
+      expect(ui.get("status").children[0]?.textContent).toContain(
+        "Restored 1 tab.",
+      );
+    });
+  }
 });

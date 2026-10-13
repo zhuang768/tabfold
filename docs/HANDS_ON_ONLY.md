@@ -3,7 +3,7 @@
 以下無法由代理人代勞，需你在自己的環境完成：
 
 1. 在**你的日常 Chrome 設定檔**載入 `dist/`（或 zip 解壓後目錄）並實際使用數天（代理人測試使用隔離 `/tmp` profile）。
-2. 用 Chrome **工作管理員**（`Shift + Esc`）對照「存起前後」分頁記憶體。在 Round 5 驗證已透過原生 Chrome Task Manager 實測觀察到：合成 64MiB 來源頁存前工作程序約 96.5MB，存起關閉後該程序確實完全釋放消失；擴充功能主進程 Library + Worker 共用 PID 由 38.9MB 增加至 44.5MB，CPU 顯示 0.0%。手動驗證可重複此步驟檢視日常頁面之釋放幅度。
+2. 用 Chrome **工作管理員**（`Shift + Esc`）對照日常分頁記憶體：在自動化測試中，代理人已可使用受控獨立 profile 量測 Chrome 工作管理員（例如 Round 8 監工獨立實測合成 64MiB 來源頁 PID 71148 存前 95.2MB / CPU 0.0，原生 Save 關閉後該來源程序完全消失；Library 與 Worker 共用 PID 71104 由 43.9MB 增至 46.4MB / CPU 0.0）。但使用者日常瀏覽中多樣真實網站、自訂外掛與個人長期設定檔下的實際記憶體釋放體驗，仍建議使用者在自己的日常環境手動觀察對照。
 3. 決定是否上架 Chrome Web Store，並用你的開發者帳號送審（本專案僅準備英文素材草稿）。
 4. 自訂快捷鍵衝突時，至 `chrome://extensions/shortcuts` 調整。
 5. 無痕模式：若需要，於 `chrome://extensions` → Tabfold →「允許在無痕模式下使用」。

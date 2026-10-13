@@ -12,7 +12,7 @@ import {
   MigrationError,
   CorruptDatabaseError,
 } from "../core/migrate.js";
-import { databaseContentMatches } from "../core/verify.js";
+import { databaseContentMatches, deepEqual } from "../core/verify.js";
 import { createId } from "../core/id.js";
 
 export const DB_KEY = "tabfold_database";
@@ -496,9 +496,14 @@ export class LibraryStore {
 
     const verify = await this.driver.get([BACKUPS_KEY]);
     const readList = verify[BACKUPS_KEY];
+    if (!Array.isArray(readList)) {
+      throw new Error(STRINGS.backupReadbackFailed);
+    }
+    const verifiedSnap = readList.find((s: Snapshot) => s && s.id === snap.id);
     if (
-      !Array.isArray(readList) ||
-      !readList.some((s: Snapshot) => s && s.id === snap.id)
+      !verifiedSnap ||
+      verifiedSnap.reason !== snap.reason ||
+      !deepEqual(verifiedSnap.database, snap.database)
     ) {
       throw new Error(STRINGS.backupReadbackFailed);
     }
@@ -540,7 +545,10 @@ export class LibraryStore {
         const rawJson = JSON.stringify(currentRaw);
         if (
           Array.isArray(sVal) &&
-          sVal.some((item) => JSON.stringify(item) === rawJson)
+          sVal.some(
+            (item) =>
+              deepEqual(item, currentRaw) || JSON.stringify(item) === rawJson,
+          )
         ) {
           salvageOk = true;
         }
@@ -559,13 +567,18 @@ export class LibraryStore {
         const next = [snap, ...existing].slice(0, MAX_BACKUPS);
         await this.driver.set({ [BACKUPS_KEY]: next });
         const verifyBackups = await this.driver.get([BACKUPS_KEY]);
-        if (
-          Array.isArray(verifyBackups[BACKUPS_KEY]) &&
-          verifyBackups[BACKUPS_KEY].some(
+        const bVal = verifyBackups[BACKUPS_KEY];
+        if (Array.isArray(bVal)) {
+          const verifiedSnap = bVal.find(
             (s: Snapshot) => s && s.id === snap.id,
-          )
-        ) {
-          backupOk = true;
+          );
+          if (
+            verifiedSnap &&
+            verifiedSnap.reason === snap.reason &&
+            deepEqual(verifiedSnap.database, snap.database)
+          ) {
+            backupOk = true;
+          }
         }
       } catch {
         // if corrupt or write failed

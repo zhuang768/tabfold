@@ -35,6 +35,7 @@ import {
   type SaveScope,
   type Settings,
   type RestoreMode,
+  type UndoState,
 } from "../../src/types.js";
 import {
   LibraryStore,
@@ -2135,6 +2136,398 @@ describe("Round 5 formal regressions (R501–R510)", () => {
       expect(sess.lastSaveResult).toBeUndefined();
       expect(sess.lastSaveAt).toBeUndefined();
       expect(popupOpened).toBe(false);
+      setStoreForTests(null);
+    });
+
+    it("R801: createBackup and restoreBackup deep-verify snapshot contents and reject destructive operations on same-id wrong-content", async () => {
+      const canaryEntry: SavedTab = {
+        schemaVersion: 2,
+        id: "canary-r801",
+        url: "https://canary-r801.test/",
+        title: "Canary R801",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const initialDb = {
+        ...createEmptyDatabase(),
+        entries: [canaryEntry],
+        settings: {
+          ...createEmptyDatabase().settings,
+          onboardingComplete: true,
+          unsavedHintAcknowledged: true,
+        },
+      };
+
+      // Case 1: clear with mutated snapshot content (same id, entries=[])
+      const base1 = memoryDriver({
+        tabfold_database: structuredClone(initialDb),
+      });
+      const driver1 = {
+        ...base1,
+        set: async (items: Record<string, unknown>) => {
+          const copy = structuredClone(items);
+          if (
+            Array.isArray(copy.tabfold_backups) &&
+            copy.tabfold_backups.length > 0
+          ) {
+            (
+              copy.tabfold_backups[0] as { database: Database }
+            ).database.entries = [];
+          }
+          return base1.set(copy);
+        },
+      };
+      setStoreForTests(new LibraryStore(driver1));
+      const clearFailRes = await handleRequest({ type: "clear" });
+      expect(clearFailRes.ok).toBe(false);
+      expect((clearFailRes as { ok: false; error: string }).error).toBe(
+        STRINGS.backupReadbackFailed,
+      );
+      const storedDb1 = (await base1.get(["tabfold_database"]))
+        .tabfold_database as Database;
+      expect(storedDb1.entries.some((e) => e.url === canaryEntry.url)).toBe(
+        true,
+      );
+
+      // Case 2: restore-backup with rejected salvage and mutated snapshot
+      const chosenDb = {
+        ...createEmptyDatabase(),
+        entries: [
+          {
+            ...canaryEntry,
+            id: "chosen-r801",
+            url: "https://chosen-r801.test/",
+          },
+        ],
+      };
+      const base2 = memoryDriver({
+        tabfold_database: structuredClone(initialDb),
+        tabfold_backups: [
+          {
+            id: "snap-chosen",
+            createdAt: Date.now(),
+            reason: "test",
+            database: chosenDb,
+          },
+        ],
+      });
+      const driver2 = {
+        ...base2,
+        set: async (items: Record<string, unknown>) => {
+          if (items.tabfold_salvage) {
+            throw new Error("Salvage unavailable");
+          }
+          const copy = structuredClone(items);
+          if (
+            Array.isArray(copy.tabfold_backups) &&
+            copy.tabfold_backups.length > 0
+          ) {
+            (
+              copy.tabfold_backups[0] as { database: Database }
+            ).database.entries = [];
+          }
+          return base2.set(copy);
+        },
+      };
+      setStoreForTests(new LibraryStore(driver2));
+      const restoreFailRes = await handleRequest({
+        type: "restore-backup",
+        id: "snap-chosen",
+      });
+      expect(restoreFailRes.ok).toBe(false);
+      expect((restoreFailRes as { ok: false; error: string }).error).toBe(
+        STRINGS.salvageReadbackFailed,
+      );
+      const storedDb2 = (await base2.get(["tabfold_database"]))
+        .tabfold_database as Database;
+      expect(storedDb2.entries.some((e) => e.url === canaryEntry.url)).toBe(
+        true,
+      );
+
+      // Case 3: Positive control with valid readback succeeds
+      const base3 = memoryDriver({
+        tabfold_database: structuredClone(initialDb),
+      });
+      setStoreForTests(new LibraryStore(base3));
+      const clearRes = await handleRequest({ type: "clear" });
+      expect(clearRes.ok).toBe(true);
+      const storedDb3 = (await base3.get(["tabfold_database"]))
+        .tabfold_database as Database;
+      expect(storedDb3.entries.length).toBe(0);
+      const backups3 = (await base3.get(["tabfold_backups"]))
+        .tabfold_backups as Array<{ database: Database }>;
+      expect(
+        backups3[0]?.database.entries.some((e) => e.url === canaryEntry.url),
+      ).toBe(true);
+      setStoreForTests(null);
+    });
+
+    it("R802: reconstructPendingSaveUndo distinguishes closed, open, and unknown get errors", async () => {
+      const e: SavedTab = {
+        schemaVersion: 2,
+        id: "tab-open-pending",
+        url: "https://still-open.test/",
+        title: "Still Open",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const expiresAt = Date.now() + 12000;
+      const initialDb = {
+        ...createEmptyDatabase(),
+        entries: [e],
+        settings: {
+          ...createEmptyDatabase().settings,
+          onboardingComplete: true,
+          unsavedHintAcknowledged: true,
+        },
+      };
+      const base = memoryDriver({
+        tabfold_database: initialDb,
+        tabfold_op_intent: {
+          opId: "save",
+          tabIds: [1],
+          entryIds: [e.id],
+          urls: [e.url],
+          timestamp: Date.now(),
+          expiresAt,
+        },
+      });
+      const b = mock([
+        {
+          id: 1,
+          url: e.url,
+          title: e.title,
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+          audible: false,
+        },
+      ]);
+
+      const origGet = chrome.tabs.get;
+      chrome.tabs.get = async (id: number) => {
+        if (id === 1) {
+          throw new Error("Transient Chrome API read unavailable");
+        }
+        return origGet(id);
+      };
+
+      setStoreForTests(new LibraryStore(base));
+      await handleRequest({ type: "get-state" });
+      await undoLastSave();
+      expect(b.created.length).toBe(0);
+      const afterDb = (await base.get(["tabfold_database"]))
+        .tabfold_database as Database;
+      expect(afterDb.entries.some((x) => x.url === e.url)).toBe(true);
+
+      // Now actually remove the tab and simulate missing tab
+      await chrome.tabs.remove(1);
+      chrome.tabs.get = async () => {
+        throw new Error("No tab with id: 1");
+      };
+      await handleRequest({ type: "get-state" });
+      const undoClosedRes = await undoLastSave();
+      expect(undoClosedRes.ok).toBe(true);
+      expect(b.created.some((t) => t.url === e.url)).toBe(true);
+      const finalDb = (await base.get(["tabfold_database"]))
+        .tabfold_database as Database;
+      expect(finalDb.entries.some((x) => x.url === e.url)).toBe(false);
+      setStoreForTests(null);
+    });
+
+    it("R803: partial durable Undo preserves failed items under original TTL for retry", async () => {
+      const a: SavedTab = {
+        schemaVersion: 2,
+        id: "partial-a",
+        url: "https://partial-a.test/",
+        title: "A",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 0, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const bEntry: SavedTab = {
+        schemaVersion: 2,
+        id: "partial-b",
+        url: "https://partial-b.test/",
+        title: "B",
+        favicon: null,
+        savedAt: Date.now(),
+        source: { windowId: 1, index: 1, pinned: false },
+        group: "",
+        tags: [],
+        status: "saved",
+      };
+      const expiresAt = Date.now() + 12000;
+      const initialDb = {
+        ...createEmptyDatabase(),
+        entries: [a, bEntry],
+        settings: {
+          ...createEmptyDatabase().settings,
+          onboardingComplete: true,
+          unsavedHintAcknowledged: true,
+        },
+      };
+      const base = memoryDriver({
+        tabfold_database: initialDb,
+        tabfold_durable_undo: {
+          ids: [a.id, bEntry.id],
+          expiresAt,
+        },
+      });
+      const b = mock();
+      const origCreate = chrome.tabs.create;
+      chrome.tabs.create = async (opts) => {
+        if (opts.url === bEntry.url) {
+          throw new Error("Transient tab creation error for B");
+        }
+        return origCreate(opts);
+      };
+
+      setStoreForTests(new LibraryStore(base));
+      const first = await undoLastSave();
+      expect(first.ok).toBe(true);
+      expect(first.message).toBe(STRINGS.undoPartial(1, 1));
+      expect(b.created.filter((t) => t.url === a.url).length).toBe(1);
+      expect(b.created.filter((t) => t.url === bEntry.url).length).toBe(0);
+
+      const midStorage = await base.get([
+        "tabfold_durable_undo",
+        "tabfold_database",
+      ]);
+      const midDurable = midStorage.tabfold_durable_undo as
+        UndoState | undefined;
+      expect(midDurable?.ids).toEqual([bEntry.id]);
+      expect(midDurable?.expiresAt).toBe(expiresAt);
+      expect(
+        (midStorage.tabfold_database as Database).entries.some(
+          (e) => e.id === bEntry.id,
+        ),
+      ).toBe(true);
+      expect(
+        (midStorage.tabfold_database as Database).entries.some(
+          (e) => e.id === a.id,
+        ),
+      ).toBe(false);
+
+      chrome.tabs.create = origCreate;
+      const retry = await undoLastSave();
+      expect(retry.ok).toBe(true);
+      expect(b.created.filter((t) => t.url === bEntry.url).length).toBe(1);
+
+      const finalStorage = await base.get([
+        "tabfold_durable_undo",
+        "tabfold_database",
+      ]);
+      expect(finalStorage.tabfold_durable_undo).toBeUndefined();
+      expect((finalStorage.tabfold_database as Database).entries.length).toBe(
+        0,
+      );
+      setStoreForTests(null);
+    });
+
+    it("R804: session publication serialization prevents stale save/cleanup from erasing new Save result after reset", async () => {
+      const base = memoryDriver({
+        tabfold_database: {
+          ...createEmptyDatabase(),
+          settings: {
+            ...createEmptyDatabase().settings,
+            onboardingComplete: true,
+            unsavedHintAcknowledged: true,
+          },
+        },
+      });
+      mock([
+        {
+          id: 1,
+          url: "https://old-tab.test/",
+          title: "Old Tab",
+          windowId: 1,
+          index: 0,
+          pinned: false,
+          active: true,
+          audible: false,
+        },
+        {
+          id: 2,
+          url: "https://new-tab.test/",
+          title: "New Tab",
+          windowId: 1,
+          index: 1,
+          pinned: false,
+          active: false,
+          audible: false,
+        },
+      ]);
+      setStoreForTests(new LibraryStore(base));
+
+      let releaseOldSet: () => void = () => {};
+      const oldSetHold = new Promise<void>((r) => {
+        releaseOldSet = r;
+      });
+      const origSet = chrome.storage.session.set;
+      let heldFirst = true;
+      chrome.storage.session.set = async (items: Record<string, unknown>) => {
+        if (heldFirst && Object.hasOwn(items, "lastSaveResult")) {
+          heldFirst = false;
+          await oldSetHold;
+        }
+        return origSet(items);
+      };
+
+      const oldCallPromise = onActionClicked({
+        id: 1,
+        url: "https://old-tab.test/",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+      } as chrome.tabs.Tab);
+
+      await handleRequest({ type: "reset-all" });
+      releaseOldSet();
+      await oldCallPromise;
+
+      const postResetSession = await chrome.storage.session.get("all");
+      expect(postResetSession.lastSaveResult).toBeUndefined();
+
+      // Configure ready settings for subsequent save
+      await base.set({
+        tabfold_database: {
+          ...createEmptyDatabase(),
+          settings: {
+            ...createEmptyDatabase().settings,
+            onboardingComplete: true,
+            unsavedHintAcknowledged: true,
+          },
+        },
+      });
+
+      await onActionClicked({
+        id: 2,
+        url: "https://new-tab.test/",
+        windowId: 1,
+        index: 0,
+        pinned: false,
+        active: true,
+      } as chrome.tabs.Tab);
+
+      const finalSession = await chrome.storage.session.get("all");
+      expect(finalSession.lastSaveResult).toBeDefined();
+      expect((finalSession.lastSaveResult as { closed: number }).closed).toBe(
+        1,
+      );
       setStoreForTests(null);
     });
   });

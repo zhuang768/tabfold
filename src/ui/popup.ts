@@ -82,10 +82,17 @@ function showStatus(
 }
 
 async function doUndo(): Promise<void> {
+  const previousEffectiveUndo = currentEffectiveUndo;
   currentEffectiveUndo = null;
   const res = await send<{ message: string }>({ type: "undo" });
-  if (res.ok) showStatus(res.data.message, "ok");
-  else showStatus(res.error, "warn");
+  if (res.ok) {
+    showStatus(res.data.message, "ok");
+  } else {
+    if (previousEffectiveUndo && previousEffectiveUndo.expiresAt > Date.now()) {
+      currentEffectiveUndo = previousEffectiveUndo;
+    }
+    showStatus(res.error, "warn");
+  }
   await load();
 }
 

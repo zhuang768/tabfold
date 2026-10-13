@@ -369,6 +369,16 @@ interface OperationIntent {
 
 let inMemoryIntent: OperationIntent | null = null;
 let resetEpoch = 0;
+let sessionPublicationQueue: Promise<void> = Promise.resolve();
+
+function withSessionPublication<T>(task: () => Promise<T>): Promise<T> {
+  const next = sessionPublicationQueue.then(task, task);
+  sessionPublicationQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
 
 async function recordIntent(intent: OperationIntent): Promise<void> {
   inMemoryIntent = intent;
@@ -472,14 +482,40 @@ async function reconstructPendingSaveUndo(
 
   const actuallyClosedEntryIds: string[] = [];
   if (typeof chrome !== "undefined" && chrome.tabs?.get) {
+    let queryTabs: chrome.tabs.Tab[] = [];
+    if (chrome.tabs.query) {
+      try {
+        const res = chrome.tabs.query({});
+        queryTabs = (
+          res && typeof (res as Promise<unknown>).then === "function"
+            ? await (res as Promise<chrome.tabs.Tab[]>).catch(() => [])
+            : Array.isArray(res)
+              ? res
+              : []
+        ) as chrome.tabs.Tab[];
+      } catch {
+        // ignore query failure
+      }
+    }
+
     for (let i = 0; i < intent.tabIds.length; i++) {
       const tabId = intent.tabIds[i];
       const entryId = intent.entryIds[i];
       if (tabId != null && entryId != null) {
         try {
           await chrome.tabs.get(tabId);
-        } catch {
-          actuallyClosedEntryIds.push(entryId);
+        } catch (err: unknown) {
+          if (queryTabs.some((t) => t.id === tabId)) {
+            continue;
+          }
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const isDefiniteMissing =
+            /no tab with id/i.test(errMsg) ||
+            /missing tab/i.test(errMsg) ||
+            /tab not found/i.test(errMsg);
+          if (isDefiniteMissing) {
+            actuallyClosedEntryIds.push(entryId);
+          }
         }
       }
     }
@@ -1575,16 +1611,18 @@ export async function undoLastSave(): Promise<{
       }
     }
     const cur = await s.readDatabaseUnlocked();
-    const nextUndoInDb =
-      chosenSource === "db"
-        ? failedIds.length && Date.now() < expiresAt
-          ? { ids: failedIds, expiresAt }
-          : null
-        : cur.undo &&
-            cur.undo.expiresAt > Date.now() &&
-            cur.undo.expiresAt > expiresAt
-          ? cur.undo
-          : null;
+    const remainingUndoIds = failedIds.filter((id) =>
+      cur.entries.some((e) => e.id === id),
+    );
+    const hasRemaining = remainingUndoIds.length > 0 && Date.now() < expiresAt;
+
+    const nextUndoInDb: UndoState | null = hasRemaining
+      ? { ids: remainingUndoIds, expiresAt }
+      : cur.undo &&
+          cur.undo.expiresAt > Date.now() &&
+          cur.undo.expiresAt > expiresAt
+        ? cur.undo
+        : null;
 
     await s.writeDatabaseUnlocked(
       {
@@ -1596,18 +1634,36 @@ export async function undoLastSave(): Promise<{
     );
     await clearJournal(UNDO_JOURNAL_KEY);
     await clearJournal(RESTORE_JOURNAL_KEY);
-    if (
-      chosenSource === "durable" ||
-      !durableCandidate ||
-      durableCandidate.expiresAt <= expiresAt
-    ) {
+
+    if (hasRemaining) {
+      const remainingDurable: UndoState = {
+        ids: remainingUndoIds,
+        expiresAt,
+      };
       try {
-        await s.getDriver().remove([DURABLE_UNDO_KEY]);
+        await s.getDriver().set({ [DURABLE_UNDO_KEY]: remainingDurable });
         if (typeof chrome !== "undefined" && chrome.storage?.session) {
-          await chrome.storage.session.remove([DURABLE_UNDO_KEY]);
+          await chrome.storage.session.set({
+            [DURABLE_UNDO_KEY]: remainingDurable,
+          });
         }
       } catch {
         // best effort
+      }
+    } else {
+      if (
+        chosenSource === "durable" ||
+        !durableCandidate ||
+        durableCandidate.expiresAt <= expiresAt
+      ) {
+        try {
+          await s.getDriver().remove([DURABLE_UNDO_KEY]);
+          if (typeof chrome !== "undefined" && chrome.storage?.session) {
+            await chrome.storage.session.remove([DURABLE_UNDO_KEY]);
+          }
+        } catch {
+          // best effort
+        }
       }
     }
     await clearJournal(UNDO_JOURNAL_KEY);
@@ -1797,22 +1853,24 @@ export async function handleRequest(req: Request): Promise<Response> {
         }
         inMemoryIntent = null;
         await clearConfirm();
-        if (typeof chrome !== "undefined" && chrome.storage?.session) {
-          try {
-            await chrome.storage.session.clear();
-          } catch {
-            await chrome.storage.session.remove([
-              "pendingConfirm",
-              "lastSaveResult",
-              "lastSaveAt",
-              DURABLE_UNDO_KEY,
-              INTENT_KEY,
-              RESTORE_JOURNAL_KEY,
-              UNDO_JOURNAL_KEY,
-              OPERATION_JOURNAL_KEY,
-            ]);
+        await withSessionPublication(async () => {
+          if (typeof chrome !== "undefined" && chrome.storage?.session) {
+            try {
+              await chrome.storage.session.clear();
+            } catch {
+              await chrome.storage.session.remove([
+                "pendingConfirm",
+                "lastSaveResult",
+                "lastSaveAt",
+                DURABLE_UNDO_KEY,
+                INTENT_KEY,
+                RESTORE_JOURNAL_KEY,
+                UNDO_JOURNAL_KEY,
+                OPERATION_JOURNAL_KEY,
+              ]);
+            }
           }
-        }
+        });
         await refreshBadgeFromDb();
         return { ok: true, data: { reset: true } };
       }
@@ -2110,16 +2168,14 @@ export async function onActionClicked(tab: chrome.tabs.Tab): Promise<void> {
   const result = await saveTabs(saveOpts);
   if (currentEpoch !== resetEpoch) return;
 
-  await chrome.storage.session.set({
-    lastSaveResult: result,
-    lastSaveAt: Date.now(),
+  await withSessionPublication(async () => {
+    if (currentEpoch !== resetEpoch) return;
+    await chrome.storage.session.set({
+      lastSaveResult: result,
+      lastSaveAt: Date.now(),
+    });
   });
-  if (currentEpoch !== resetEpoch) {
-    await chrome.storage.session
-      .remove(["lastSaveResult", "lastSaveAt"])
-      .catch(() => undefined);
-    return;
-  }
+  if (currentEpoch !== resetEpoch) return;
 
   try {
     await chrome.action.setPopup({ popup: "popup.html" });
@@ -2207,16 +2263,14 @@ export function registerServiceWorkerListeners(): void {
     const result = await saveTabs(opts);
     if (currentEpoch !== resetEpoch) return;
     try {
-      await chrome.storage.session.set({
-        lastSaveResult: result,
-        lastSaveAt: Date.now(),
+      await withSessionPublication(async () => {
+        if (currentEpoch !== resetEpoch) return;
+        await chrome.storage.session.set({
+          lastSaveResult: result,
+          lastSaveAt: Date.now(),
+        });
       });
-      if (currentEpoch !== resetEpoch) {
-        await chrome.storage.session
-          .remove(["lastSaveResult", "lastSaveAt"])
-          .catch(() => undefined);
-        return;
-      }
+      if (currentEpoch !== resetEpoch) return;
     } catch {
       // session storage fallback
     }

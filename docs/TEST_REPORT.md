@@ -1,31 +1,27 @@
 # TEST_REPORT.md — Tabfold 測試報告
 
-**日期：** 2026-10-12（環境：macOS darwin，Node v22.18+ / v26.3.0）  
-**範圍：** Round-6 完整修正後（覆蓋 R601–R614、R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
+**日期：** 2026-10-13（環境：macOS darwin，Node v26.3.0 / npm 11.16.0）  
+**範圍：** Round-8 完整修正後（候選 `56e5fa121858b0a1d4ec57f3e1cce4d274b365a4`，覆蓋 R801–R810、R701–R714、R601–R614、R501–R524、R401–R420、R301–R324、R201–R220、C01–C24）
 
 ## 指令與結果摘要
 
-| 指令                                                                                                                 | Exit code | 結果                                                                                                                                                                                                                                                        |
-| -------------------------------------------------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm ci`                                                                                                             | 0         | 165 packages；`found 0 vulnerabilities`                                                                                                                                                                                                                     |
-| `npm run format:check`                                                                                               | 0         | Prettier 格式檢查全部通過                                                                                                                                                                                                                                   |
-| `npm run typecheck`                                                                                                  | 0         | TypeScript 型別嚴格檢查通過                                                                                                                                                                                                                                 |
-| `npm run lint`                                                                                                       | 0         | ESLint 0 warnings / 0 errors                                                                                                                                                                                                                                |
-| `npm run test`                                                                                                       | 0         | **81** 個單元測試全數通過（含 R701–R710 備份讀回校驗、最新 Undo 權威、中斷 Worker 重建、普通還原新開分頁、Reset 取消中途回呼、UI Generation 防覆寫、無關 Error 保持 Undo、Options busy 解除，以及 R601–R614、R501–R510 核心資料層與 R512–R515 UI 時序回歸） |
-| `npm run build`                                                                                                      | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                                                                                                                                                                                           |
-| `npm run test:e2e`                                                                                                   | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、無痕權限、原型 ID Restore/Undo、CDP Worker 停重啟）                                                                                                                                              |
-| `npm run test:perf`                                                                                                  | 0         | 產出 `output/perf/perf-samples.json`（p50=139.44ms, p95=186.78ms ≤200ms）                                                                                                                                                                                   |
-| `npm run pack`                                                                                                       | 0         | `tabfold-extension.zip` 封裝完成且內容與 `dist/` 逐檔一致                                                                                                                                                                                                   |
-| `npm audit`                                                                                                          | 0         | **0** vulnerabilities（未透過 audit --force，標準 lockfile 無 dead override）                                                                                                                                                                               |
-| `TSX_DISABLE_CACHE=1 node --import tsx output/engineer/round-7/attempt-1/core-current-new-probes.mjs`                 | 0         | **4** 項 Round 7 核心邊界與反例全數通過（0 fail, 0 harness error）                                                                                                                                                                                           |
-| `TSX_DISABLE_CACHE=1 node --import tsx output/engineer/round-7/attempt-1/core-backup-test-quality-probes.mjs`         | 0         | `R7-CLEAR-DROPPED-ROLLING-BACKUP` 通過，讀回失敗自動回滾且原始 Raw 完整復原（PASS）                                                                                                                                                                         |
-| `node output/engineer/round-7/attempt-1/reset-inflight-callback-attempt1.mjs`                                        | 0         | **5** 項 reset-all 在途中 Save 回呼單調紀元抑制斷言全數通過（PASS）                                                                                                                                                                                         |
-| `node output/engineer/round-7/attempt-1/ui-latest-save-authority-attempt-1.mjs`                                       | 0         | **14** 項最新 Save Undo 權威優先性與中斷 Worker 意圖重建斷言全數通過（PASS）                                                                                                                                                                                |
-| `node output/engineer/round-7/attempt-1/ui-async-authority-attempt-1.mjs`                                             | 0         | **12** 項 UI 載入世代（`loadGeneration`）防覆寫與無關錯誤保留 Undo 斷言全數通過（PASS）                                                                                                                                                                     |
-| `node output/engineer/round-7/attempt-1/ui-authority-state-attempt-2.mjs`                                             | 0         | **9** 項 Options `aria-busy` 清除與權威狀態隔離斷言全數通過（PASS）                                                                                                                                                                                         |
-| `node --import tsx output/engineer/round-7/attempt-2/hibernate-direct-cdp-attempt1.mjs`                              | 0         | **7** 項官方 Chrome headless 原生 CDP Hibernate 斷言全數通過（無 viewport 模擬，真 DOM 操作，native discarded=true，保留視窗/Index/URL，無 Save/Close 假計數，重新啟用精確還原，0 error，完整清理）                                                      |
+| 指令                                                                                                    | Exit code | 結果                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm ci`                                                                                                | 0         | 165 packages；`found 0 vulnerabilities`（Node 26.3.0 / npm 11.16.0 乾淨安裝通過；含 eslint 9.39.5 直接 deprecated 警示與 3 個 allowScripts 安裝策略 advisory，無死 override）                                                                                                          |
+| `npm run format:check`                                                                                  | 0         | Prettier 格式檢查全部通過                                                                                                                                                                                                                                                                  |
+| `npm run typecheck`                                                                                     | 0         | TypeScript 型別嚴格檢查通過（0 errors, `tsc --noEmit`）                                                                                                                                                                                                                                   |
+| `npm run lint`                                                                                          | 0         | ESLint 0 warnings / 0 errors（`--max-warnings 0`）                                                                                                                                                                                                                                         |
+| `npm run test`                                                                                          | 0         | **87** 個單元測試全數通過（含 R801–R805 備份深比較驗證、pending Save unknown 區分、partial durable Undo 失敗項 TTL 內重試、Reset 在途發表序列化、Library transport 失敗保留有效重試入口，以及 R701–R710、R601–R614 核心與 UI 時序回歸，0 fail, 0 skip）                                |
+| `npm run build`                                                                                         | 0         | 產出 `dist/`，包含 esbuild CSS 語法驗證 gate 與 manifest 字串同步                                                                                                                                                                                                                         |
+| `npm run test:e2e`                                                                                      | 0         | **5** Playwright 無頭 Chromium E2E 測試全數通過（含真音訊、無痕權限、原型 ID Restore/Undo、CDP Worker 停重啟，0 fail, 0 flaky）                                                                                                                                                          |
+| `npm run test:perf`                                                                                     | 0         | 產出 `output/perf/perf-samples.json`（p50=136.27ms, p95=188.82ms ≤ 200ms）                                                                                                                                                                                                                 |
+| `npm run pack`                                                                                          | 0         | `tabfold-extension.zip` 封裝完成且 20 個 runtime 檔案內容與 `dist/` 逐檔一致                                                                                                                                                                                                               |
+| `npm audit`                                                                                             | 0         | **0** vulnerabilities（標準 lockfile，無 dead override）                                                                                                                                                                                                                                   |
+| `TSX_DISABLE_CACHE=1 node --import tsx output/engineer/round-8/attempt-1/core-focused-new-attempt-1.mjs` | 0         | **4** 項 Round 8 核心受控邊界斷言全數通過（R8-BACKUP-SAME-ID-WRONG-CONTENT, R8-PENDING-SAVE-UNKNOWN-GET-IS-NOT-CLOSED, R8-PARTIAL-DURABLE-UNDO-RETRY-ORIGINAL-TTL, R8-RESET-OLD-CLEANUP-CANNOT-DELETE-NEW-RESULT；0 fail, 0 harness error）                                                |
+| `node output/engineer/round-8/attempt-1/ui-cache-error-attempt-1.mjs`                                   | 0         | **14** 項 Round 8 UI 權威與快取錯誤斷言全數通過（確證 Library 與 Popup 在 Undo transport 拒絕後保留可見錯誤並維持 unexpired retry 按鈕入口，0 fail, 0 harness error）                                                                                                                    |
+| `node --import tsx output/engineer/round-7/attempt-2/hibernate-direct-cdp-attempt1.mjs`                 | 0         | **7** 項官方 Chrome headless 原生 CDP Hibernate 斷言全數通過（無 viewport 模擬，真 DOM 操作，native discarded=true，保留視窗/Index/URL，無 Save/Close 假計數，重新啟用精確還原，0 error，完整清理）                                                                                    |
 
-## 單元測試（65 項安全與核心契約）
+## 單元測試（87 項安全與核心契約）
 
 - **基礎範圍與操作（Scope & URL）**：
   - `current`、`others`、`window` 正確選取分頁，排除內部頁面與危險 scheme
@@ -88,7 +84,7 @@
   - R607: Popup、List、Options 三介面初期載入階段加入明確視覺 loading 與 `aria-busy` 語意
   - R608: 持久性 Undo（`tabfold_durable_undo`）作為公開狀態回退來源，介面重啟維持 Undo 控制項可見性
   - R609: 集中管理所有錯誤與提示字串於 `src/strings.ts`，禁止未集中字串
-  - R610: 最低相容環境明確載明為 Node 20/22+、npm 11+（說明 npm 10.9.2 因 esbuild binary postinstall 問題無法在乾淨 git checkout 執行 npm ci）
+  - R610: 最低相容環境明確載明為 Node 20/22+、npm 11+（說明 npm 10.9.2 因 lockfile 驗證 EUSAGE 錯誤，缺少 esbuild platform packages，無法在乾淨 git checkout 執行 npm ci）
   - R611: 補充研究、設計、決策文件之官方永久連結、作者特徵與 Apple Design Award 2017 細節
   - R612: 隱私權政策與 README 明確定義 `chrome.storage.local` 與 `session` 之分區範圍與 `reset-all` 清除範圍
 - **Round 7 備份防護、Undo 權威與邊界修復（R701–R714）**：
@@ -106,6 +102,12 @@
   - R712: 效能測量口徑明確切分 Extension Page Tab 與原生 Action Bubble，誠實記錄首幀 165.5ms long-animation-frame
   - R713: 研究與設計精確歸因（OneTab 官方匯出純文字規範、BuenJ 相對時間、Tabfold 自訂 tokens）
   - R714: 標記無頭 Chromium 下 Playwright Viewport Emulation 對無 View 之 Discarded 分頁導致崩潰（SIGSEGV / No tab with id）與 TaskManager 無 action click 量測為環境方法限制；以 direct-CDP probe（`hibernate-direct-cdp-attempt1.mjs`）於官方 Chrome headless 隔離驗證 native `chrome.tabs.discard()` 與重新啟用（7/7 PASS、0 error），確證產品實作與行為完全正常。
+- **Round 8 內容完整性、Unknown I/O 區分、重試權威與發表序列化（R801–R810）**：
+  - R801: `createBackup` 與 `restoreBackup` 引入 `deepEqual` 完整資料內容深度比對，即使快照 ID 相同但內容遭清空亦嚴格拒絕破壞性 clear / restore，確保原庫唯一 URL 不遺失。
+  - R802: `reconstructPendingSaveUndo` 正確區分已關、仍開與未知 I/O 異常，`chrome.tabs.get` 暫時異常時若分頁仍在 query 清單中則判定為未知，絕不盲目推斷為已關閉而重複開頁或消耗庫存條目。
+  - R803: partial durable Undo 失敗項目保留有效權威與原 `expiresAt`，成功項目自資料庫移除，失敗項目維持在 DB 與 durable undo 中，允許在原 TTL 內重試復原。
+  - R804: `onActionClicked` / `handleContextMenuSave` 與 `reset-all` 之 session 發表透過 `withSessionPublication` 循序串列化，單調紀元變更時直接取消發表，徹底消除舊 callback 延遲清理誤刪新 Save 結果的競態。
+  - R805: UI (`list.ts` / `popup.ts`) 在 Undo transport 拒絕後保留可見錯誤提示，並維持未消耗之有效 Undo 按鈕入口，允許使用者在 TTL 內直接重試。
 
 ## E2E 整合測試（5 項無頭 Chromium 測試）
 
@@ -127,23 +129,25 @@
 
 ## 效能實測指標（1,000 條目與 Popup Ready）
 
-根據 `npm run test:perf`（產出於 `output/perf/perf-samples.json`）：
+根據 `npm run test:perf`（產出於 `output/perf/perf-samples.json`）與監工獨立量測：
 
 - **Popup 可操作互動時間（Interactive Ready）**：
-  - 測量口徑說明：Extension Page Tab (popup.html 在一般分頁中模擬載入；自動化無頭環境無法直接點擊系統工作列之原生 Chrome Action Bubble)。
+  - 測量口徑說明：Extension Page Tab（popup.html 在一般分頁中模擬載入；自動化無頭環境無法直接點擊系統工作列之原生 Chrome Action Bubble）。
   - 條件：30 次連續樣本，嚴格檢查 Scope 載入完成、計數呈現、Loading 隱藏、條目清單繪製。
-  - p50：**139.44 ms**（目標 ≤ 200 ms）
-  - p95：**186.78 ms**（目標 ≤ 200 ms）
+  - 工程師實跑（`output/perf/perf-samples.json`）：p50=**136.27 ms**，p95=**188.82 ms**（目標 ≤ 200 ms）。
+  - 監工獨立測量（`output/supervision/round-8/perf-independent-attempt1/perf-samples.json`）：30 DOM-ready 樣本 p50=**133.08 ms**，p95=**188.1 ms**（全數 ≤ 200 ms）。
   - 原始規格之 200ms 為設計追求的互動響應目標，非所有 cold-start 樣本在任何硬體下之絕對硬性截斷門檻。
 - **1,000 筆資料庫搜尋與滾動**：
-  - 搜尋結果計算與 DOM 收斂：**21.56 ms**
-  - 長清單滾動時間：**22.72 ms**（滾動高度 78,543 px）
-  - JS Heap 記憶體使用：約 **3.7 MB**（3,729,730 bytes）
-  - DOM 節點數量：11,263 nodes
+  - 工程師實跑：搜尋結果計算與 DOM 收斂 **25.82 ms**，滾動時間 **24.16 ms**（滾動高度 78,543 px），JS Heap 使用約 **3.76 MB**（3,757,375 bytes），DOM 節點 11,263 nodes。
+  - 監工獨立測量：1,000 筆渲染，搜尋精確 1 條目 **23.06 ms**，JS Heap 約 **2.60 MB**（2,596,804 bytes），連續 133 幀 rAF 期間無 long tasks 與無 long-animation-frames。
 - **原生 Action Bubble 與 Chrome Task Manager 實測觀察**：
-  - 原生 Action Bubble 啟動受 Chrome 原生擴充功能通訊、背景 Service Worker 喚醒與 CDP 本身連線開銷影響，測量時鐘不應與純頁面渲染時鐘混淆（詳見 `docs/KNOWN_LIMITATIONS.md`）。
-  - 在 Round 5 監工原生 Task Manager 實測觀察中：合成 64MiB 來源分頁儲存前佔用 96.5MB 工作程序、儲存關閉後該分頁程序確實完全釋放消失；擴充功能主進程 Library + Worker 共用 PID 由 38.9MB 增加至 44.5MB，CPU 顯示 0.0%（非絕對零，且有共用 PID 底層開銷）。Worker Profiler 記錄之比例為擴充功能執行代碼比例，非全作業系統 CPU 佔用率。
-  - 1,000 筆長清單於真實瀏覽器實測 134 requestAnimationFrame 連續幀中，記錄到 0 個 >50ms long tasks，但在首幀大型佈局繪製時觀測到 1 個 165.5ms long-animation-frame。此反映大型清單首次 paint 開銷，不能泛稱在所有極端冷啟動情境下 100% 毫無掉幀。
+  - 原生 Action Bubble 啟動受 Chrome 原生擴充功能通訊、背景 Service Worker 喚醒與 CDP 本身連線開銷影響，測量時鐘包含 API 發起、CDP discovery/attach 與 5ms 觀測週期，不應與純頁面渲染時鐘混淆（詳見 `docs/KNOWN_LIMITATIONS.md`）。
+  - **Chrome Task Manager 有效前後配對（監工獨立實測 `native-memory-valid-summary.json`）**：合成 64MiB 來源分頁（PID 71148）儲存前佔用 95.2 MB 工作程序，真 nativeToolbar Save 關閉後該來源程序確實完全釋放消失；擴充功能主進程 Library + Worker 共用 PID（71104）由 43.9 MB 微幅調整至 46.4 MB，CPU 顯示 0.0%。此反映單一來源分頁之確切記憶體釋放，非全瀏覽器 OS RAM 總額保證。
+  - **原生 POPUP 首互動上界（監工獨立實測 `native-popup-first-interaction-attempt3-result.json` & attempt4）**：
+    - 連續條件（attempt3）：3 筆條目 p50 約 31.0 ms、p95 330.6 ms（1 > 200ms）；1,000 筆條目 p50 393.4 ms、p95 533.1 ms（5 > 200ms）。其中部分 Chrome 擴充功能原生 API 開啟延遲本身即約 280–299 ms。
+    - 500ms 間隔條件（attempt4）：3 筆條目 p50 309.4 ms、p95 324.3 ms；1,000 筆條目 p50 454.7 ms、p95 499.6 ms。
+    - 此數據包含 API 發起至觀察可操作之上界（含 CDP 開銷），功能 100% 通過，但不作為精準 OS 點擊延遲小於 200ms 的硬性宣稱。
+  - 歷史 134 幀觀測中記錄之 1 個 165.5ms long-animation-frame 僅代表該次繪製週期長度，無歸因資料，不作首幀 paint 因果宣稱。
 
 ## 儲存容量實測（真實 Chrome getBytesInUse）
 
